@@ -1,0 +1,36 @@
+{
+  "tinker_api_key": null,
+  "base_model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "rank": 8,
+
+  "learning_rate": 1e-4,
+  "num_episodes": 1000,
+  "max_steps_per_episode": 1000,
+  "batch_size": 8,
+  "gamma": 0.99,
+
+  "score_reward_scale": 1.0,
+  "invalid_move_penalty": -10.0,
+  "game_over_penalty": -50.0,
+  "valid_move_bonus": 1.0,
+
+  "save_interval": 50,
+  "checkpoint_dir": "checkpoints",
+  "experiment_name": "2048-rl-experiment",
+
+  "eval_interval": 25,
+  "eval_episodes": 5,
+
+  "use_wandb": true,
+  "wandb_project": "2048-tinker-rl",
+  "wandb_entity": null,
+  "log_interval": 1,
+
+  "temperature": 0.7,
+  "max_tokens": 50,
+  "top_p": 0.9,
+
+  "use_baseline": true,
+  "entropy_coef": 0.01,
+  "clip_grad_norm": 1.0
+}

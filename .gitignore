@@ -11,3 +11,24 @@ set_env.sh
 *.so
 .ipynb_checkpoints
 .claude
+
+# Project specific
+checkpoints/
+*.pt
+*.pth
+wandb/
+
+# Python
+*.pyc
+*.pyo
+*.egg-info
+dist/
+build/
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
