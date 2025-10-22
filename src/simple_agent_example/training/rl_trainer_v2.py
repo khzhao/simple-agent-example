@@ -1,10 +1,12 @@
 import asyncio
-import os
 import uuid
 
+import numpy as np
 import tinker
-from tinker import AdamParams, ServiceClient, types
+import torch
+from tinker import ServiceClient, types
 
+import wandb
 from simple_agent_example.envs import Game2048Env
 from simple_agent_example.models import ActionParser, TextStateEncoder
 from simple_agent_example.training.config_v2 import TrainingConfigV2
@@ -20,14 +22,23 @@ class RLTrainerV2:
         self.env = Game2048Env()
         self.model_path = model_path
 
-        self._setup_tinker(model_path)
+        self._setup(model_path)
 
-    def _setup_tinker(self, model_path: str):
+    def _setup(self, model_path: str):
         """Initialize Tinker service and training client."""
         if tinker is None:
             raise ImportError(
                 "Tinker is not installed. Install with: pip install tinker"
             )
+
+        wandb.init(
+            project=self.config.wandb_project,
+            name=f"trainer-{str(uuid.uuid4())}",
+            config={
+                **self.config.__dict__,
+            },
+            tags=self.config.wandb_tags,
+        )
 
         # Get API key from config or environment
         # Create service client
@@ -66,7 +77,6 @@ class RLTrainerV2:
 
     def _save_model_weights(self):
         """Save model weights."""
-        self.training_client.save_state(name=f"checkpoint-{str(uuid.uuid4())}").result()
         self.current_model_path = (
             self.training_client.save_state(name=f"checkpoint-{str(uuid.uuid4())}")
             .result()
@@ -82,6 +92,8 @@ class RLTrainerV2:
         sampling_params = types.SamplingParams(
             max_tokens=20, top_p=0.9, temperature=1.0, stop=["\n"]
         )
+
+        max_tile = 0
 
         episode = []
 
@@ -102,10 +114,12 @@ class RLTrainerV2:
             action_text = self.tokenizer.decode(output_tokens, skip_special_tokens=True)
             action = ActionParser.parse_action(action_text)
             if action == -1:
-                continue
+                print(f"Invalid action: {action_text}, using random action...")
+                action = env.action_space.sample()
 
             next_obs, reward, terminated, truncated, next_info = env.step(action)
             done = terminated or truncated
+            max_tile = max(max_tile, next_info["max_tile"])
             obs = next_obs
             info = next_info
             move_count += 1
@@ -119,6 +133,7 @@ class RLTrainerV2:
                     "reward": reward,
                     "done": done,
                     "move_count": move_count,
+                    "max_tile": max_tile,
                 }
             )
         return episode
@@ -130,3 +145,109 @@ class RLTrainerV2:
             episode_task = asyncio.create_task(self.generate_episode())
             episode_batch.append(episode_task)
         return await asyncio.gather(*episode_batch)
+
+    async def train_on_new_batch(self):
+        """Train the model on a new batch of episodes."""
+        episode_batch = await self.generate_batch()
+        return await self.train_on_batch(episode_batch)
+
+    async def train_on_batch(self, episode_batch):
+        """Train the model."""
+        episode_batch_processed = []
+        for episode in episode_batch:
+            processed_episode = []
+            for i, transition in enumerate(episode):
+                state_text = transition["state_text"]
+                action_text = transition["action_text"]
+                logprobs = transition["logprobs"]
+                reward = transition["reward"]
+                max_tile = transition["max_tile"]
+
+                processed_episode.append(
+                    {
+                        "state_text": state_text,
+                        "action_text": action_text,
+                        "logprobs": logprobs,
+                        "reward": reward * self.config.gamma**i,
+                        "max_tile": max_tile,
+                    }
+                )
+            episode_batch_processed.append(processed_episode)
+
+        tinker_datums = []
+        for episode in episode_batch_processed:
+            for i, transition in enumerate(episode):
+                state_tokens = self.tokenizer.encode(
+                    transition["state_text"], add_special_tokens=False
+                )
+                action_tokens = self.tokenizer.encode(
+                    transition["action_text"], add_special_tokens=False
+                )
+
+                tokens = state_tokens + action_tokens
+                logprobs = [-10] * len(state_tokens) + transition["logprobs"]
+                rewards = [0] * len(state_tokens) + [transition["reward"]] * len(
+                    transition["logprobs"]
+                )
+                input_tokens = tokens[:-1]
+                target_tokens = tokens[1:]
+
+                tinker_datums.append(
+                    tinker.Datum(
+                        model_input=types.ModelInput.from_ints(input_tokens),
+                        loss_fn_inputs={
+                            "target_tokens": types.TensorData.from_torch(
+                                torch.tensor(target_tokens)
+                            ),
+                            "logprobs": types.TensorData.from_torch(
+                                torch.tensor(logprobs[1:])
+                            ),
+                            "advantages": types.TensorData.from_torch(
+                                torch.tensor(rewards[1:])
+                            ),
+                        },
+                    )
+                )
+
+        fwd_bwd_result = await self.training_client.forward_backward_async(
+            tinker_datums, "ppo"
+        )
+        fb_result = await fwd_bwd_result
+
+        adam_params = tinker.AdamParams(
+            learning_rate=0.0001,
+            beta1=0.9,
+            beta2=0.95,
+            eps=1e-8,
+        )
+        optim_result = await self.training_client.optim_step_async(adam_params)
+        opt_result = await optim_result
+
+        all_rewards = []
+        all_max_tiles = [
+            max([transition["max_tile"] for transition in episode])
+            for episode in episode_batch
+        ]
+        total_moves = [len(transition) for transition in episode_batch]
+        for episode in episode_batch:
+            all_rewards.extend([transition["reward"] for transition in episode])
+
+        wandb.log(
+            {
+                "batch_loss": fb_result.metrics["loss:sum"],
+                "average_reward": np.mean(all_rewards),
+                "average_max_tile": np.mean(all_max_tiles),
+                "average_move_count": np.mean(total_moves),
+            }
+        )
+        return fb_result, opt_result
+
+    async def train(self):
+        for episode_num in range(self.config.num_episodes):
+            print(f"Training on episode {episode_num}")
+            fb_result, opt_result = await self.train_on_new_batch()
+            print(f"Episode {episode_num}: {fb_result.metrics}, {opt_result}")
+
+            if episode_num % self.config.save_interval == 0 and episode_num > 0:
+                self._save_model_weights()
+                print(f"Saved model weights to {self.current_model_path}")
