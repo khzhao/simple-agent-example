@@ -84,12 +84,7 @@ class RLTrainerV2:
 
     async def generate_episode(self):
         """Generate an episode."""
-        env = Game2048Env(
-            max_tile_reward_weight=self.config.max_tile_reward_weight,
-            valid_moves_reward_weight=self.config.valid_moves_reward_weight,
-            invalid_move_penalty=self.config.invalid_move_penalty,
-            terminal_penalty=self.config.terminal_penalty,
-        )
+        env = Game2048Env()
         obs, info = env.reset()
         move_count = 0
         done = False
@@ -158,8 +153,10 @@ class RLTrainerV2:
     async def train_on_batch(self, episode_batch):
         """Train the model."""
         episode_batch_processed = []
+        all_rewards = []
         for episode in episode_batch:
             processed_episode = []
+            all_rewards.append([transition["reward"] for transition in episode])
             for i, transition in enumerate(episode):
                 state_text = transition["state_text"]
                 action_text = transition["action_text"]
@@ -172,13 +169,20 @@ class RLTrainerV2:
                         "state_text": state_text,
                         "action_text": action_text,
                         "logprobs": logprobs,
-                        "reward": reward * self.config.gamma**i,
+                        "reward": reward,  # Use raw reward, no discounting
                         "max_tile": max_tile,
                     }
                 )
             episode_batch_processed.append(processed_episode)
 
         tinker_datums = []
+
+        # nan pad at the end of all_rewards to the same length as the longest episode
+        max_length = max([len(episode) for episode in episode_batch_processed])
+        all_rewards = [
+            episode + [np.nan] * (max_length - len(episode)) for episode in all_rewards
+        ]
+        all_rewards_mean = np.nanmean(all_rewards, axis=0)
         for episode in episode_batch_processed:
             for i, transition in enumerate(episode):
                 state_tokens = self.tokenizer.encode(
@@ -190,9 +194,9 @@ class RLTrainerV2:
 
                 tokens = state_tokens + action_tokens
                 logprobs = [-10] * len(state_tokens) + transition["logprobs"]
-                rewards = [0] * len(state_tokens) + [transition["reward"]] * len(
-                    transition["logprobs"]
-                )
+                rewards = [0] * len(state_tokens) + [
+                    transition["reward"] - all_rewards_mean[i]
+                ] * len(transition["logprobs"])
                 input_tokens = tokens[:-1]
                 target_tokens = tokens[1:]
 
@@ -219,7 +223,7 @@ class RLTrainerV2:
         fb_result = await fwd_bwd_result
 
         adam_params = tinker.AdamParams(
-            learning_rate=0.0001,
+            learning_rate=self.config.learning_rate,
             beta1=0.9,
             beta2=0.95,
             eps=1e-8,
@@ -255,3 +259,9 @@ class RLTrainerV2:
             if episode_num % self.config.save_interval == 0 and episode_num > 0:
                 self._save_model_weights()
                 print(f"Saved model weights to {self.current_model_path}")
+
+            # Update sampling client with the new trained weights
+            self.sampling_client = self._save_weights_and_get_sampling_client()
+            print(
+                f"Updated sampling client with new trained weights: {self.current_sampler_path}"
+            )

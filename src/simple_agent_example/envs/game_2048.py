@@ -12,21 +12,12 @@ class Game2048Env(gym.Env):
     Observation space: Box(4, 4) - 4x4 grid with tile values
     """
 
-    def __init__(
-        self,
-        max_tile_reward_weight: float = 1.0,
-        valid_moves_reward_weight: float = 2.0,
-        invalid_move_penalty: float = -10.0,
-        terminal_penalty: float = -50.0,
-    ):
+    def __init__(self):
         """
-        Initialize the 2048 environment.
-        
-        Args:
-            max_tile_reward_weight: Weight for max tile increase reward
-            valid_moves_reward_weight: Weight for number of valid moves bonus
-            invalid_move_penalty: Penalty for invalid moves
-            terminal_penalty: Additional penalty when game ends
+        Initialize the 2048 environment with ART-style reward function.
+
+        Reward function returns the max tile value on the board, encouraging
+        the agent to create higher tiles.
         """
         super().__init__()
 
@@ -39,12 +30,6 @@ class Game2048Env(gym.Env):
         self.observation_space = gym.spaces.Box(
             low=0, high=131072, shape=(self.grid_size, self.grid_size), dtype=np.int32
         )
-
-        # Reward function parameters
-        self.max_tile_reward_weight = max_tile_reward_weight
-        self.valid_moves_reward_weight = valid_moves_reward_weight
-        self.invalid_move_penalty = invalid_move_penalty
-        self.terminal_penalty = terminal_penalty
 
         self.grid = None
         self.score = 0
@@ -70,7 +55,10 @@ class Game2048Env(gym.Env):
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
-        Execute one step in the environment.
+        Execute one step in the environment using ART-style reward function.
+
+        Reward = max_tile_value on the board after the action.
+        This simple reward function encourages the agent to create higher tiles.
 
         Args:
             action: 0=Up, 1=Down, 2=Left, 3=Right
@@ -78,53 +66,23 @@ class Game2048Env(gym.Env):
         Returns:
             observation, reward, terminated, truncated, info
         """
-        previous_max_tile = int(np.max(self.grid))
-        previous_score = self.score
-
         # Execute move
         moved = self._move(action)
 
-        # Calculate reward
-        reward = 0.0
         if moved:
             # Add random tile after successful move
             self._add_random_tile()
-
-            # Update max tile
-            self.max_tile = int(np.max(self.grid))
-
-            # Reward component 1: Max tile increase
-            # Use log scale to reward exponential growth in tile values
-            max_tile_increase = self.max_tile - previous_max_tile
-            if max_tile_increase > 0:
-                # Reward logarithmically based on the new max tile value
-                reward += self.max_tile_reward_weight * np.log2(self.max_tile)
-
-            # Reward component 2: Score increase (merging tiles)
-            score_increase = self.score - previous_score
-            reward += float(score_increase) * 0.1  # Scale down score reward
-
-            # Reward component 3: Number of valid moves available
-            # This encourages keeping options open for strategic play
-            num_valid_moves = len(self.get_valid_actions())
-            reward += self.valid_moves_reward_weight * num_valid_moves
-
-            # Small bonus for making any valid move
-            reward += 1.0
-
             self.move_count += 1
-        else:
-            # Penalty for invalid moves
-            reward = self.invalid_move_penalty
-            self.max_tile = int(np.max(self.grid))
+
+        # Update max tile
+        self.max_tile = int(np.max(self.grid))
+
+        # ART-style reward: simply the max tile value
+        reward = float(self.max_tile)
 
         # Check if game is over (no valid moves)
         terminated = not self._has_valid_moves()
         truncated = False
-
-        # Additional penalty for losing
-        if terminated:
-            reward += self.terminal_penalty
 
         info = self._get_info()
 
