@@ -19,7 +19,6 @@ class RLTrainerV2:
 
     def __init__(self, config: TrainingConfigV2, model_path: str):
         self.config = config
-        self.env = Game2048Env()
         self.model_path = model_path
 
         self._setup(model_path)
@@ -85,7 +84,12 @@ class RLTrainerV2:
 
     async def generate_episode(self):
         """Generate an episode."""
-        env = Game2048Env()
+        env = Game2048Env(
+            max_tile_reward_weight=self.config.max_tile_reward_weight,
+            valid_moves_reward_weight=self.config.valid_moves_reward_weight,
+            invalid_move_penalty=self.config.invalid_move_penalty,
+            terminal_penalty=self.config.terminal_penalty,
+        )
         obs, info = env.reset()
         move_count = 0
         done = False
