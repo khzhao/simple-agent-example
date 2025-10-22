@@ -155,6 +155,7 @@ class RLTrainer:
             sequence = result.sequences[0]
             output_tokens = sequence.tokens
             logprobs = sequence.logprobs if hasattr(sequence, 'logprobs') else None
+            assert logprobs is not None
 
             # Decode tokens to text
             model_output = self.tokenizer.decode(output_tokens, skip_special_tokens=True)
@@ -188,6 +189,7 @@ class RLTrainer:
 
         while not done and move_count < self.config.max_steps_per_episode:
             # Encode current state as text
+            print("Encoding state...")
             state_text = self.encoder.encode_state(
                 grid=obs,
                 score=info["score"],
@@ -195,18 +197,22 @@ class RLTrainer:
             )
 
             # Sample action from model
+            print("Sampling action...")
             action, model_output, logprobs = self._sample_action(state_text)
 
             # Handle invalid action parsing
             if action == -1:
+                print("Invalid action, using random action...")
                 # Random fallback action
                 action = self.env.action_space.sample()
                 invalid_moves += 1
 
             # Get action text for training
+            print("Getting action text...")
             action_text = self.parser.action_to_text(action)
 
             # Take action in environment
+            print("Taking action in environment...")
             next_obs, reward, terminated, truncated, next_info = self.env.step(action)
             done = terminated or truncated
 

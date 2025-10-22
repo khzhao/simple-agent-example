@@ -10,13 +10,9 @@ class Game2048Env(gym.Env):
     Action space: Discrete(4) - 0: Up, 1: Down, 2: Left, 3: Right
     Observation space: Box(4, 4) - 4x4 grid with tile values
     """
-
-    metadata = {"render_modes": ["human", "text"]}
-
-    def __init__(self, render_mode: str = None):
+    def __init__(self):
         super().__init__()
 
-        self.render_mode = render_mode
         self.grid_size = 4
 
         # Action space: 0=Up, 1=Down, 2=Left, 3=Right
@@ -128,12 +124,24 @@ class Game2048Env(gym.Env):
 
     def _move_left(self) -> Tuple[np.ndarray, int]:
         """Move/merge tiles left."""
-        new_grid = np.zeros_like(self.grid)
+        return self._move_left_grid(self.grid)
+
+    def _move_left_grid(self, grid: np.ndarray) -> Tuple[np.ndarray, int]:
+        """
+        Move/merge tiles left on a given grid.
+        
+        Args:
+            grid: The grid to process
+            
+        Returns:
+            Tuple of (new_grid, score_delta)
+        """
+        new_grid = np.zeros_like(grid)
         score_delta = 0
 
         for row_idx in range(self.grid_size):
             # Get non-zero values
-            row = self.grid[row_idx, :]
+            row = grid[row_idx, :]
             non_zero = row[row != 0]
 
             # Merge tiles
@@ -161,24 +169,26 @@ class Game2048Env(gym.Env):
 
     def _move_right(self) -> Tuple[np.ndarray, int]:
         """Move/merge tiles right."""
-        # Flip, move left, flip back
-        self.grid = np.fliplr(self.grid)
-        new_grid, score_delta = self._move_left()
+        # Flip, move left, flip back (without modifying self.grid)
+        flipped_grid = np.fliplr(self.grid)
+        new_grid, score_delta = self._move_left_grid(flipped_grid)
         return np.fliplr(new_grid), score_delta
 
     def _move_up(self) -> Tuple[np.ndarray, int]:
         """Move/merge tiles up."""
-        # Transpose, move left, transpose back
-        self.grid = self.grid.T
-        new_grid, score_delta = self._move_left()
+        # Transpose, move left, transpose back (without modifying self.grid)
+        transposed_grid = self.grid.T
+        new_grid, score_delta = self._move_left_grid(transposed_grid)
         return new_grid.T, score_delta
 
     def _move_down(self) -> Tuple[np.ndarray, int]:
         """Move/merge tiles down."""
-        # Transpose, move right, transpose back
-        self.grid = self.grid.T
-        new_grid, score_delta = self._move_right()
-        return new_grid.T, score_delta
+        # Transpose, flip, move left, flip back, transpose back (without modifying self.grid)
+        transposed_grid = self.grid.T
+        flipped_grid = np.fliplr(transposed_grid)
+        new_grid, score_delta = self._move_left_grid(flipped_grid)
+        unflipped_grid = np.fliplr(new_grid)
+        return unflipped_grid.T, score_delta
 
     def _add_random_tile(self) -> None:
         """Add a random tile (2 or 4) to an empty cell."""
@@ -214,6 +224,39 @@ class Game2048Env(gym.Env):
 
         return False
 
+    def get_valid_actions(self) -> list[int]:
+        """
+        Get list of valid actions that would change the board state.
+        
+        Returns:
+            List of valid action indices (0=Up, 1=Down, 2=Left, 3=Right)
+        """
+        valid_actions = []
+        
+        for action in range(4):
+            # Simulate the move without modifying the actual grid
+            if action == 0:  # Up
+                transposed_grid = self.grid.T
+                new_grid, _ = self._move_left_grid(transposed_grid)
+                new_grid = new_grid.T
+            elif action == 1:  # Down
+                transposed_grid = self.grid.T
+                flipped_grid = np.fliplr(transposed_grid)
+                new_grid, _ = self._move_left_grid(flipped_grid)
+                new_grid = np.fliplr(new_grid).T
+            elif action == 2:  # Left
+                new_grid, _ = self._move_left_grid(self.grid)
+            else:  # Right (action == 3)
+                flipped_grid = np.fliplr(self.grid)
+                new_grid, _ = self._move_left_grid(flipped_grid)
+                new_grid = np.fliplr(new_grid)
+            
+            # Check if the move would change the board
+            if not np.array_equal(self.grid, new_grid):
+                valid_actions.append(action)
+        
+        return valid_actions
+
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info about the current state."""
         return {
@@ -221,17 +264,17 @@ class Game2048Env(gym.Env):
             "max_tile": int(np.max(self.grid)) if self.grid is not None else 0,
             "move_count": self.move_count,
             "empty_cells": int(np.sum(self.grid == 0)) if self.grid is not None else 0,
+            "valid_actions": self.get_valid_actions() if self.grid is not None else [],
         }
 
     def render(self):
         """Render the game state."""
-        if self.render_mode == "human" or self.render_mode == "text":
-            print(f"\nScore: {self.score} | Max Tile: {self.max_tile} | Moves: {self.move_count}")
+        print(f"\nScore: {self.score} | Max Tile: {self.max_tile} | Moves: {self.move_count}")
+        print("-" * 25)
+        for row in self.grid:
+            print("|" + "|".join(f"{int(val):5}" if val != 0 else "     " for val in row) + "|")
             print("-" * 25)
-            for row in self.grid:
-                print("|" + "|".join(f"{int(val):5}" if val != 0 else "     " for val in row) + "|")
-                print("-" * 25)
-            print()
+        print()
 
     def get_text_state(self) -> str:
         """
@@ -249,6 +292,15 @@ class Game2048Env(gym.Env):
 
         text += f"\nEmpty cells: {np.sum(self.grid == 0)}"
         text += f"\nMax tile: {np.max(self.grid)}"
-        text += "\nAvailable actions: up, down, left, right"
+        
+        # Show only valid actions
+        valid_actions = self.get_valid_actions()
+        action_names = {0: "up", 1: "down", 2: "left", 3: "right"}
+        valid_action_names = [action_names[action] for action in valid_actions]
+        
+        if valid_action_names:
+            text += f"\nAvailable actions: {', '.join(valid_action_names)}"
+        else:
+            text += "\nNo valid actions available (game over)"
 
         return text
