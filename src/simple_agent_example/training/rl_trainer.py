@@ -100,7 +100,7 @@ class RLTrainer:
 
         # Load tokenizer
         print(f"Loading tokenizer for {self.config.base_model}")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.base_model)
+        self.tokenizer = self.training_client.get_tokenizer()
 
         print("Tinker LORA training client initialized successfully!")
 
@@ -123,12 +123,12 @@ class RLTrainer:
 
         return self.sampling_client
 
-    def _sample_action(self, state_text: str) -> Tuple[int, str]:
+    def _sample_action(self, state_text: str) -> Tuple[int, str, Optional[List[float]]]:
         """
         Sample action from the model given state text.
 
         Returns:
-            Tuple of (action_int, model_output_text)
+            Tuple of (action_int, model_output_text, logprobs)
         """
         try:
             # Tokenize the state text
@@ -151,8 +151,10 @@ class RLTrainer:
                 sampling_params=sampling_params,
             ).result()
 
-            # Get the output tokens
-            output_tokens = result.sequences[0].tokens
+            # Get the output tokens and logprobs
+            sequence = result.sequences[0]
+            output_tokens = sequence.tokens
+            logprobs = sequence.logprobs if hasattr(sequence, 'logprobs') else None
 
             # Decode tokens to text
             model_output = self.tokenizer.decode(output_tokens, skip_special_tokens=True)
@@ -160,14 +162,14 @@ class RLTrainer:
             # Parse action from output
             action = self.parser.parse_action(model_output)
 
-            return action, model_output
+            return action, model_output, logprobs
 
         except Exception as e:
             print(f"Error sampling from model: {e}")
             import traceback
             traceback.print_exc()
             # Return random action on error
-            return self.env.action_space.sample(), ""
+            return self.env.action_space.sample(), "", None
 
     def _collect_episode(self, episode_num: int) -> EpisodeMetrics:
         """
@@ -193,7 +195,7 @@ class RLTrainer:
             )
 
             # Sample action from model
-            action, model_output = self._sample_action(state_text)
+            action, model_output, logprobs = self._sample_action(state_text)
 
             # Handle invalid action parsing
             if action == -1:
@@ -216,6 +218,7 @@ class RLTrainer:
                 "reward": reward,
                 "done": done,
                 "model_output": model_output,
+                "logprobs": logprobs,
             })
 
             episode_reward += reward
@@ -264,7 +267,7 @@ class RLTrainer:
 
         return returns
 
-    def _create_datum(self, state_text: str, action_text: str, advantage: float) -> tinker.Datum:
+    def _create_datum(self, state_text: str, action_text: str, advantage: float, logprobs: Optional[List[float]]) -> tinker.Datum:
         """
         Create a Tinker Datum object for training.
 
@@ -272,23 +275,59 @@ class RLTrainer:
             state_text: The state prompt
             action_text: The action completion
             advantage: The advantage value (for weighting)
+            logprobs: The log probabilities from sampling
 
         Returns:
             A Tinker Datum object
         """
-        # Tokenize state and action
-        state_tokens = self.tokenizer.encode(state_text, add_special_tokens=True)
-        action_tokens = self.tokenizer.encode(action_text, add_special_tokens=False)
+        # Tokenize state and action separately without special tokens first
+        state_tokens_raw = self.tokenizer.encode(state_text, add_special_tokens=False)
+        action_tokens_raw = self.tokenizer.encode(action_text, add_special_tokens=False)
+        
+        # Manually add BOS token if the tokenizer uses one
+        # This ensures our token arrays match what ModelInput expects
+        bos_token_id = self.tokenizer.bos_token_id
+        if bos_token_id is not None:
+            state_tokens = [bos_token_id] + state_tokens_raw
+        else:
+            state_tokens = state_tokens_raw
+        
+        # Concatenate: state (with BOS) + action
+        full_tokens = state_tokens + action_tokens_raw
+        
+        num_state_tokens = len(state_tokens)
+        num_action_tokens = len(action_tokens_raw)
+        total_tokens = len(full_tokens)
 
-        # Create model input from state tokens
-        model_input = tinker.types.ModelInput.from_ints(state_tokens)
+        # Create model input from full token sequence
+        model_input = tinker.types.ModelInput.from_ints(full_tokens)
 
-        # Create datum with action tokens as target and advantage as weight
+        # Target tokens: same as full sequence
+        target_tokens_tensor = torch.tensor(full_tokens, dtype=torch.long)
+        target_tokens_data = tinker.TensorData.from_torch(target_tokens_tensor)
+
+        # Advantages: zero for state tokens, advantage value for action tokens
+        advantages_array = [0.0] * num_state_tokens + [advantage] * num_action_tokens
+        advantages_tensor = torch.tensor(advantages_array, dtype=torch.float32)
+        advantages_data = tinker.TensorData.from_torch(advantages_tensor)
+
+        # Logprobs: need to match full sequence length
+        if logprobs is not None and len(logprobs) == num_action_tokens:
+            # Pad with zeros for state tokens, use actual logprobs for action tokens
+            logprobs_array = [0.0] * num_state_tokens + logprobs
+        else:
+            # Fallback: all zeros
+            logprobs_array = [0.0] * total_tokens
+        logprobs_tensor = torch.tensor(logprobs_array, dtype=torch.float32)
+        logprobs_data = tinker.TensorData.from_torch(logprobs_tensor)
+
+        # Create datum with all required fields for importance_sampling
         return tinker.Datum(
             model_input=model_input,
             loss_fn_inputs={
-                "target_tokens": action_tokens,
-                "advantage": float(advantage),
+                "target_tokens": target_tokens_data,
+                "logprobs": logprobs_data,
+                "advantages": advantages_data,
             }
         )
 
@@ -318,6 +357,7 @@ class RLTrainer:
                     "state_text": transition["state_text"],
                     "action_text": transition["action_text"],
                     "advantage": advantage,
+                    "logprobs": transition.get("logprobs"),
                 })
 
         # Normalize advantages for stability
@@ -335,6 +375,7 @@ class RLTrainer:
                     state_text=data["state_text"],
                     action_text=data["action_text"],
                     advantage=data["advantage"],
+                    logprobs=data["logprobs"],
                 )
                 datum_list.append(datum)
 
@@ -411,7 +452,7 @@ class RLTrainer:
                 state_text = self.encoder.encode_state(obs, info["score"], move_count)
 
                 # Sample action
-                action, _ = self._sample_action(state_text)
+                action, _, _ = self._sample_action(state_text)
 
                 if action == -1:
                     action = self.env.action_space.sample()
