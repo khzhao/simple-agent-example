@@ -98,7 +98,7 @@ class TrainingMetrics:
     # Best performance
     best_score: int = 0
     best_max_tile: int = 0
-    best_episode_reward: float = float('-inf')
+    best_episode_reward: float = float("-inf")
 
     # Success metrics
     win_rate: float = 0.0  # Percentage reaching 2048

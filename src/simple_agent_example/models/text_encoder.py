@@ -3,9 +3,10 @@ Text-based state encoder for 2048 game.
 Converts game state to natural language and parses model outputs.
 """
 
-import numpy as np
 import re
 from typing import Dict, List
+
+import numpy as np
 
 
 class TextStateEncoder:
@@ -43,12 +44,14 @@ class TextStateEncoder:
         max_tile = int(np.max(grid))
         empty_cells = int(np.sum(grid == 0))
 
-        text_parts.extend([
-            f"\nLargest tile: {max_tile}",
-            f"Empty cells: {empty_cells}",
-            "\nChoose your next move from: up, down, left, right",
-            "Respond with only the direction (e.g., 'up' or 'down' or 'left' or 'right').",
-        ])
+        text_parts.extend(
+            [
+                f"\nLargest tile: {max_tile}",
+                f"Empty cells: {empty_cells}",
+                "\nChoose your next move from: up, down, left, right",
+                "Respond with only the direction (e.g., 'up' or 'down' or 'left' or 'right').",
+            ]
+        )
 
         return "\n".join(text_parts)
 
@@ -75,7 +78,9 @@ class TextStateEncoder:
         return "\n".join(lines)
 
     @staticmethod
-    def create_prompt_with_state(grid: np.ndarray, score: int, move_count: int = 0) -> str:
+    def create_prompt_with_state(
+        grid: np.ndarray, score: int, move_count: int = 0
+    ) -> str:
         """
         Create a complete prompt for the model including game state.
 

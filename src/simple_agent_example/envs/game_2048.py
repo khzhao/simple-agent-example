@@ -1,6 +1,7 @@
+from typing import Any, Dict, Tuple
+
 import gymnasium as gym
 import numpy as np
-from typing import Tuple, Dict, Any
 
 
 class Game2048Env(gym.Env):
@@ -10,6 +11,7 @@ class Game2048Env(gym.Env):
     Action space: Discrete(4) - 0: Up, 1: Down, 2: Left, 3: Right
     Observation space: Box(4, 4) - 4x4 grid with tile values
     """
+
     def __init__(self):
         super().__init__()
 
@@ -20,10 +22,7 @@ class Game2048Env(gym.Env):
 
         # Observation space: 4x4 grid with values from 0 to 2^17 (131072)
         self.observation_space = gym.spaces.Box(
-            low=0,
-            high=131072,
-            shape=(self.grid_size, self.grid_size),
-            dtype=np.int32
+            low=0, high=131072, shape=(self.grid_size, self.grid_size), dtype=np.int32
         )
 
         self.grid = None
@@ -129,10 +128,10 @@ class Game2048Env(gym.Env):
     def _move_left_grid(self, grid: np.ndarray) -> Tuple[np.ndarray, int]:
         """
         Move/merge tiles left on a given grid.
-        
+
         Args:
             grid: The grid to process
-            
+
         Returns:
             Tuple of (new_grid, score_delta)
         """
@@ -227,12 +226,12 @@ class Game2048Env(gym.Env):
     def get_valid_actions(self) -> list[int]:
         """
         Get list of valid actions that would change the board state.
-        
+
         Returns:
             List of valid action indices (0=Up, 1=Down, 2=Left, 3=Right)
         """
         valid_actions = []
-        
+
         for action in range(4):
             # Simulate the move without modifying the actual grid
             if action == 0:  # Up
@@ -250,11 +249,11 @@ class Game2048Env(gym.Env):
                 flipped_grid = np.fliplr(self.grid)
                 new_grid, _ = self._move_left_grid(flipped_grid)
                 new_grid = np.fliplr(new_grid)
-            
+
             # Check if the move would change the board
             if not np.array_equal(self.grid, new_grid):
                 valid_actions.append(action)
-        
+
         return valid_actions
 
     def _get_info(self) -> Dict[str, Any]:
@@ -269,10 +268,16 @@ class Game2048Env(gym.Env):
 
     def render(self):
         """Render the game state."""
-        print(f"\nScore: {self.score} | Max Tile: {self.max_tile} | Moves: {self.move_count}")
+        print(
+            f"\nScore: {self.score} | Max Tile: {self.max_tile} | Moves: {self.move_count}"
+        )
         print("-" * 25)
         for row in self.grid:
-            print("|" + "|".join(f"{int(val):5}" if val != 0 else "     " for val in row) + "|")
+            print(
+                "|"
+                + "|".join(f"{int(val):5}" if val != 0 else "     " for val in row)
+                + "|"
+            )
             print("-" * 25)
         print()
 
@@ -292,12 +297,12 @@ class Game2048Env(gym.Env):
 
         text += f"\nEmpty cells: {np.sum(self.grid == 0)}"
         text += f"\nMax tile: {np.max(self.grid)}"
-        
+
         # Show only valid actions
         valid_actions = self.get_valid_actions()
         action_names = {0: "up", 1: "down", 2: "left", 3: "right"}
         valid_action_names = [action_names[action] for action in valid_actions]
-        
+
         if valid_action_names:
             text += f"\nAvailable actions: {', '.join(valid_action_names)}"
         else:

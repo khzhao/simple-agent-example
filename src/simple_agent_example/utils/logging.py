@@ -2,17 +2,18 @@
 Logging utilities for training, including WandB integration.
 """
 
-from typing import Dict, Any, Optional
 import os
+from typing import Any, Dict, Optional
 
 try:
     import wandb
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
     print("Warning: wandb not installed. Install with: pip install wandb")
 
-from simple_agent_example.training.config import TrainingConfig, EpisodeMetrics
+from simple_agent_example.training.config import EpisodeMetrics, TrainingConfig
 
 
 class WandBLogger:
@@ -80,16 +81,19 @@ class WandBLogger:
             return
 
         try:
-            wandb.log({
-                "episode": metrics.episode_num,
-                "episode/reward": metrics.total_reward,
-                "episode/score": metrics.final_score,
-                "episode/max_tile": metrics.max_tile,
-                "episode/num_moves": metrics.num_moves,
-                "episode/avg_reward": metrics.average_reward,
-                "episode/invalid_moves": metrics.invalid_moves,
-                "episode/won": int(metrics.game_won),
-            }, step=metrics.episode_num)
+            wandb.log(
+                {
+                    "episode": metrics.episode_num,
+                    "episode/reward": metrics.total_reward,
+                    "episode/score": metrics.final_score,
+                    "episode/max_tile": metrics.max_tile,
+                    "episode/num_moves": metrics.num_moves,
+                    "episode/avg_reward": metrics.average_reward,
+                    "episode/invalid_moves": metrics.invalid_moves,
+                    "episode/won": int(metrics.game_won),
+                },
+                step=metrics.episode_num,
+            )
 
         except Exception as e:
             print(f"Error logging episode to WandB: {e}")
@@ -132,12 +136,15 @@ class WandBLogger:
             return
 
         try:
-            wandb.log({
-                "train/avg_reward": avg_reward,
-                "train/avg_score": avg_score,
-                "train/best_score": best_score,
-                "train/win_rate": win_rate,
-            }, step=step)
+            wandb.log(
+                {
+                    "train/avg_reward": avg_reward,
+                    "train/avg_score": avg_score,
+                    "train/best_score": best_score,
+                    "train/win_rate": win_rate,
+                },
+                step=step,
+            )
         except Exception as e:
             print(f"Error logging aggregate metrics: {e}")
 
@@ -182,7 +189,7 @@ class WandBLogger:
             # Log as a table for easy inspection
             table = wandb.Table(
                 columns=["state", "model_output", "action", "reward"],
-                data=[[state_text[:200], model_output[:200], action, reward]]
+                data=[[state_text[:200], model_output[:200], action, reward]],
             )
 
             wandb.log({"model_samples": table}, step=step)
@@ -205,7 +212,9 @@ class WandBLogger:
         except Exception as e:
             print(f"Error watching model: {e}")
 
-    def save_artifact(self, file_path: str, artifact_name: str, artifact_type: str = "model"):
+    def save_artifact(
+        self, file_path: str, artifact_name: str, artifact_type: str = "model"
+    ):
         """
         Save file as WandB artifact.
 
@@ -256,11 +265,13 @@ class ConsoleLogger:
 
     def log_episode(self, metrics: EpisodeMetrics):
         """Log episode to console."""
-        print(f"Episode {metrics.episode_num}: "
-              f"Score={metrics.final_score}, "
-              f"Tile={metrics.max_tile}, "
-              f"Reward={metrics.total_reward:.2f}, "
-              f"Moves={metrics.num_moves}")
+        print(
+            f"Episode {metrics.episode_num}: "
+            f"Score={metrics.final_score}, "
+            f"Tile={metrics.max_tile}, "
+            f"Reward={metrics.total_reward:.2f}, "
+            f"Moves={metrics.num_moves}"
+        )
 
     def log_training_metrics(self, metrics_dict: Dict[str, Any], step: int):
         """Log training metrics to console."""
@@ -268,10 +279,12 @@ class ConsoleLogger:
 
     def log_aggregate_metrics(self, avg_reward, avg_score, best_score, win_rate, step):
         """Log aggregate metrics to console."""
-        print(f"Step {step}: AvgReward={avg_reward:.2f}, "
-              f"AvgScore={avg_score:.2f}, "
-              f"BestScore={best_score}, "
-              f"WinRate={win_rate:.2%}")
+        print(
+            f"Step {step}: AvgReward={avg_reward:.2f}, "
+            f"AvgScore={avg_score:.2f}, "
+            f"BestScore={best_score}, "
+            f"WinRate={win_rate:.2%}"
+        )
 
     def log_evaluation(self, eval_metrics: Dict[str, Any], step: int):
         """Log evaluation to console."""

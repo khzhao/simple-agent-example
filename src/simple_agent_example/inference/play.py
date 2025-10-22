@@ -22,7 +22,7 @@ except ImportError:
     AutoTokenizer = None
 
 from simple_agent_example.envs import Game2048Env
-from simple_agent_example.models import TextStateEncoder, ActionParser
+from simple_agent_example.models import ActionParser, TextStateEncoder
 from simple_agent_example.training.config import TrainingConfig
 
 
@@ -172,7 +172,9 @@ class GamePlayer:
                 output_tokens = result.sequences[0].tokens
 
                 # Decode tokens to text
-                model_output = self.tokenizer.decode(output_tokens, skip_special_tokens=True)
+                model_output = self.tokenizer.decode(
+                    output_tokens, skip_special_tokens=True
+                )
                 action = self.parser.parse_action(model_output)
 
                 if verbose:
@@ -189,7 +191,9 @@ class GamePlayer:
             if action == -1:
                 action = self.env.action_space.sample()
                 if verbose:
-                    print(f"  Using random action: {self.parser.action_to_text(action)}")
+                    print(
+                        f"  Using random action: {self.parser.action_to_text(action)}"
+                    )
 
             # Take action
             obs, reward, terminated, truncated, info = self.env.step(action)

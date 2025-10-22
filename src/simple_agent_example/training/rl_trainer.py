@@ -4,17 +4,18 @@ Reinforcement Learning trainer for 2048 using Tinker API for LORA fine-tuning.
 This implementation uses Tinker's synchronous API based on official documentation.
 """
 
-import os
-import numpy as np
-from typing import List, Dict, Tuple, Optional
-from pathlib import Path
 import json
+import os
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 try:
     import tinker
+    import torch
     from tinker import ServiceClient
     from tinker.types import SamplingParams
-    import torch
     from transformers import AutoTokenizer
 except ImportError:
     print("Warning: required packages not installed")
@@ -25,12 +26,10 @@ except ImportError:
     AutoTokenizer = None
 
 from simple_agent_example.envs import Game2048Env
-from simple_agent_example.models import TextStateEncoder, ActionParser
-from simple_agent_example.training.config import (
-    TrainingConfig,
-    EpisodeMetrics,
-    TrainingMetrics,
-)
+from simple_agent_example.models import ActionParser, TextStateEncoder
+from simple_agent_example.training.config import (EpisodeMetrics,
+                                                  TrainingConfig,
+                                                  TrainingMetrics)
 from simple_agent_example.utils import WandBLogger
 
 
@@ -79,7 +78,9 @@ class RLTrainer:
     def _setup_tinker(self):
         """Initialize Tinker service and training client."""
         if tinker is None:
-            raise ImportError("Tinker is not installed. Install with: pip install tinker")
+            raise ImportError(
+                "Tinker is not installed. Install with: pip install tinker"
+            )
 
         # Get API key from config or environment
         api_key = self.config.tinker_api_key or os.environ.get("TINKER_API_KEY")
@@ -92,7 +93,9 @@ class RLTrainer:
         self.service_client = ServiceClient(api_key=api_key)
 
         # Create LORA training client
-        print(f"Creating LORA training client with base model: {self.config.base_model}")
+        print(
+            f"Creating LORA training client with base model: {self.config.base_model}"
+        )
         self.training_client = self.service_client.create_lora_training_client(
             self.config.base_model,
             rank=self.config.rank,
@@ -118,8 +121,14 @@ class RLTrainer:
 
         # Save weights and get sampling client
         # Use a unique name each time to avoid conflicts
-        sampler_name = f"sampler-{self.batch_counter}" if checkpoint_name is None else f"{checkpoint_name}-sampler"
-        self.sampling_client = self.training_client.save_weights_and_get_sampling_client(name=sampler_name)
+        sampler_name = (
+            f"sampler-{self.batch_counter}"
+            if checkpoint_name is None
+            else f"{checkpoint_name}-sampler"
+        )
+        self.sampling_client = (
+            self.training_client.save_weights_and_get_sampling_client(name=sampler_name)
+        )
 
         return self.sampling_client
 
@@ -154,11 +163,13 @@ class RLTrainer:
             # Get the output tokens and logprobs
             sequence = result.sequences[0]
             output_tokens = sequence.tokens
-            logprobs = sequence.logprobs if hasattr(sequence, 'logprobs') else None
+            logprobs = sequence.logprobs if hasattr(sequence, "logprobs") else None
             assert logprobs is not None
 
             # Decode tokens to text
-            model_output = self.tokenizer.decode(output_tokens, skip_special_tokens=True)
+            model_output = self.tokenizer.decode(
+                output_tokens, skip_special_tokens=True
+            )
 
             # Parse action from output
             action = self.parser.parse_action(model_output)
@@ -168,6 +179,7 @@ class RLTrainer:
         except Exception as e:
             print(f"Error sampling from model: {e}")
             import traceback
+
             traceback.print_exc()
             # Return random action on error
             return self.env.action_space.sample(), "", None
@@ -217,15 +229,17 @@ class RLTrainer:
             done = terminated or truncated
 
             # Store transition with all info needed for training
-            trajectory.append({
-                "state_text": state_text,
-                "action": action,
-                "action_text": action_text,
-                "reward": reward,
-                "done": done,
-                "model_output": model_output,
-                "logprobs": logprobs,
-            })
+            trajectory.append(
+                {
+                    "state_text": state_text,
+                    "action": action,
+                    "action_text": action_text,
+                    "reward": reward,
+                    "done": done,
+                    "model_output": model_output,
+                    "logprobs": logprobs,
+                }
+            )
 
             episode_reward += reward
             move_count += 1
@@ -246,10 +260,12 @@ class RLTrainer:
         )
 
         # Store trajectory for training
-        self.episode_buffer.append({
-            "trajectory": trajectory,
-            "metrics": metrics,
-        })
+        self.episode_buffer.append(
+            {
+                "trajectory": trajectory,
+                "metrics": metrics,
+            }
+        )
 
         return metrics
 
@@ -273,7 +289,13 @@ class RLTrainer:
 
         return returns
 
-    def _create_datum(self, state_text: str, action_text: str, advantage: float, logprobs: Optional[List[float]]) -> tinker.Datum:
+    def _create_datum(
+        self,
+        state_text: str,
+        action_text: str,
+        advantage: float,
+        logprobs: Optional[List[float]],
+    ) -> tinker.Datum:
         """
         Create a Tinker Datum object for training.
 
@@ -289,7 +311,7 @@ class RLTrainer:
         # Tokenize state and action separately without special tokens first
         state_tokens_raw = self.tokenizer.encode(state_text, add_special_tokens=False)
         action_tokens_raw = self.tokenizer.encode(action_text, add_special_tokens=False)
-        
+
         # Manually add BOS token if the tokenizer uses one
         # This ensures our token arrays match what ModelInput expects
         bos_token_id = self.tokenizer.bos_token_id
@@ -297,10 +319,10 @@ class RLTrainer:
             state_tokens = [bos_token_id] + state_tokens_raw
         else:
             state_tokens = state_tokens_raw
-        
+
         # Concatenate: state (with BOS) + action
         full_tokens = state_tokens + action_tokens_raw
-        
+
         num_state_tokens = len(state_tokens)
         num_action_tokens = len(action_tokens_raw)
         total_tokens = len(full_tokens)
@@ -334,7 +356,7 @@ class RLTrainer:
                 "target_tokens": target_tokens_data,
                 "logprobs": logprobs_data,
                 "advantages": advantages_data,
-            }
+            },
         )
 
     def _train_on_batch(self):
@@ -359,12 +381,14 @@ class RLTrainer:
 
             # Collect training data
             for transition, advantage in zip(trajectory, returns):
-                all_data.append({
-                    "state_text": transition["state_text"],
-                    "action_text": transition["action_text"],
-                    "advantage": advantage,
-                    "logprobs": transition.get("logprobs"),
-                })
+                all_data.append(
+                    {
+                        "state_text": transition["state_text"],
+                        "action_text": transition["action_text"],
+                        "advantage": advantage,
+                        "logprobs": transition.get("logprobs"),
+                    }
+                )
 
         # Normalize advantages for stability
         advantages = np.array([d["advantage"] for d in all_data])
@@ -405,6 +429,7 @@ class RLTrainer:
         except Exception as e:
             print(f"Error during training: {e}")
             import traceback
+
             traceback.print_exc()
 
         # Clear buffer
@@ -424,7 +449,7 @@ class RLTrainer:
 
             # Also save metrics locally
             metrics_path = self.checkpoint_dir / f"metrics_ep{episode_num}.json"
-            with open(metrics_path, 'w') as f:
+            with open(metrics_path, "w") as f:
                 json.dump(self.metrics.get_summary(), f, indent=2)
 
         except Exception as e:
@@ -517,7 +542,9 @@ class RLTrainer:
                     print(f"  Max Tile: {episode_metrics.max_tile}")
                     print(f"  Reward: {episode_metrics.total_reward:.2f}")
                     print(f"  Moves: {episode_metrics.num_moves}")
-                    print(f"  Avg Score (last 100): {self.metrics.avg_episode_score:.2f}")
+                    print(
+                        f"  Avg Score (last 100): {self.metrics.avg_episode_score:.2f}"
+                    )
                     print(f"  Win Rate: {self.metrics.win_rate:.2%}\n")
 
                     # Log aggregate metrics to WandB
