@@ -128,6 +128,7 @@ class RLTrainerV2:
                     "state_text": state_text,
                     "action": action,
                     "action_text": action_text,
+                    "action_tokens": output_tokens,  # Store original tokens!
                     "logprobs": logprobs,
                     "reward": reward,
                     "done": done,
@@ -152,70 +153,75 @@ class RLTrainerV2:
 
     async def train_on_batch(self, episode_batch):
         """Train the model."""
-        episode_batch_processed = []
-        all_rewards = []
-        for episode in episode_batch:
-            processed_episode = []
-            all_rewards.append([transition["reward"] for transition in episode])
-            for i, transition in enumerate(episode):
-                state_text = transition["state_text"]
-                action_text = transition["action_text"]
-                logprobs = transition["logprobs"]
-                reward = transition["reward"]
-                max_tile = transition["max_tile"]
+        # Compute discounted returns for each episode
+        episode_data = []
+        all_returns = []
 
-                processed_episode.append(
+        for episode in episode_batch:
+            # Extract rewards for this episode
+            rewards = [transition["reward"] for transition in episode]
+
+            # Compute discounted returns: R_t = r_t + γr_{t+1} + γ²r_{t+2} + ...
+            returns = []
+            G = 0  # Running return
+            for reward in reversed(rewards):
+                G = reward + self.config.gamma * G
+                returns.insert(0, G)
+
+            # Store episode data with computed returns
+            for transition, return_value in zip(episode, returns):
+                episode_data.append(
                     {
-                        "state_text": state_text,
-                        "action_text": action_text,
-                        "logprobs": logprobs,
-                        "reward": reward,  # Use raw reward, no discounting
-                        "max_tile": max_tile,
+                        "state_text": transition["state_text"],
+                        "action_tokens": transition["action_tokens"],
+                        "logprobs": transition["logprobs"],
+                        "return": return_value,  # Discounted return as advantage
                     }
                 )
-            episode_batch_processed.append(processed_episode)
+                all_returns.append(return_value)
 
+        # Normalize returns across entire batch for stable training
+        all_returns = np.array(all_returns)
+        return_mean = np.mean(all_returns)
+        return_std = np.std(all_returns) + 1e-8
+
+        # Build training data with normalized advantages
         tinker_datums = []
+        for i, data in enumerate(episode_data):
+            state_tokens = self.tokenizer.encode(
+                data["state_text"], add_special_tokens=False
+            )
+            action_tokens = data["action_tokens"]
 
-        # nan pad at the end of all_rewards to the same length as the longest episode
-        max_length = max([len(episode) for episode in episode_batch_processed])
-        all_rewards = [
-            episode + [np.nan] * (max_length - len(episode)) for episode in all_rewards
-        ]
-        all_rewards_mean = np.nanmean(all_rewards, axis=0)
-        for episode in episode_batch_processed:
-            for i, transition in enumerate(episode):
-                state_tokens = self.tokenizer.encode(
-                    transition["state_text"], add_special_tokens=False
-                )
-                action_tokens = self.tokenizer.encode(
-                    transition["action_text"], add_special_tokens=False
-                )
+            tokens = state_tokens + action_tokens
+            logprobs = [-10] * len(state_tokens) + data["logprobs"]
 
-                tokens = state_tokens + action_tokens
-                logprobs = [-10] * len(state_tokens) + transition["logprobs"]
-                rewards = [0] * len(state_tokens) + [
-                    transition["reward"] - all_rewards_mean[i]
-                ] * len(transition["logprobs"])
-                input_tokens = tokens[:-1]
-                target_tokens = tokens[1:]
+            # Normalized advantage from discounted returns
+            normalized_advantage = (data["return"] - return_mean) / return_std
 
-                tinker_datums.append(
-                    tinker.Datum(
-                        model_input=types.ModelInput.from_ints(input_tokens),
-                        loss_fn_inputs={
-                            "target_tokens": types.TensorData.from_torch(
-                                torch.tensor(target_tokens)
-                            ),
-                            "logprobs": types.TensorData.from_torch(
-                                torch.tensor(logprobs[1:])
-                            ),
-                            "advantages": types.TensorData.from_torch(
-                                torch.tensor(rewards[1:])
-                            ),
-                        },
-                    )
+            # Apply advantage only to action tokens (0 for state tokens)
+            rewards = [0] * len(state_tokens) + [normalized_advantage] * len(
+                data["logprobs"]
+            )
+            input_tokens = tokens[:-1]
+            target_tokens = tokens[1:]
+
+            tinker_datums.append(
+                tinker.Datum(
+                    model_input=types.ModelInput.from_ints(input_tokens),
+                    loss_fn_inputs={
+                        "target_tokens": types.TensorData.from_torch(
+                            torch.tensor(target_tokens)
+                        ),
+                        "logprobs": types.TensorData.from_torch(
+                            torch.tensor(logprobs[1:])
+                        ),
+                        "advantages": types.TensorData.from_torch(
+                            torch.tensor(rewards[1:], dtype=torch.float32)
+                        ),
+                    },
                 )
+            )
 
         fwd_bwd_result = await self.training_client.forward_backward_async(
             tinker_datums, "ppo"
@@ -244,6 +250,7 @@ class RLTrainerV2:
             {
                 "batch_loss": fb_result.metrics["loss:sum"],
                 "average_reward": np.mean(all_rewards),
+                "average_return": return_mean,  # Average discounted return
                 "average_max_tile": np.mean(all_max_tiles),
                 "average_move_count": np.mean(total_moves),
             }
@@ -253,7 +260,15 @@ class RLTrainerV2:
     async def train(self):
         for episode_num in range(self.config.num_episodes):
             print(f"Training on episode {episode_num}")
-            fb_result, opt_result = await self.train_on_new_batch()
+            try:
+                fb_result, opt_result = await self.train_on_new_batch()
+            except Exception as e:
+                print(f"Error during training: {e}")
+                import traceback
+
+                traceback.print_exc()
+                continue
+
             print(f"Episode {episode_num}: {fb_result.metrics}, {opt_result}")
 
             if episode_num % self.config.save_interval == 0 and episode_num > 0:

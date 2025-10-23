@@ -14,7 +14,7 @@ class TrainingConfigV2:
     learning_rate: float = 1e-4
     num_episodes: int = 2000
     # max_steps_per_episode: int = 1000
-    max_steps_per_episode: int = 250
+    max_steps_per_episode: int = 500
     batch_size: int = 16  # Number of episodes before update
     gamma: float = 0.99  # Discount factor for future rewards
 
