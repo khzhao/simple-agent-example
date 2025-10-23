@@ -23,4 +23,4 @@ class TrainingConfigV2:
     wandb_tags: tuple[str] = ("2048", "rl", "tinker", "lora")
 
     # Checkpointing settings
-    save_interval: int = 10  # Save every N episodes
+    save_interval: int = 5  # Save every N episodes

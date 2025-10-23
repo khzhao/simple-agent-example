@@ -55,10 +55,11 @@ class Game2048Env(gym.Env):
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
-        Execute one step in the environment using ART-style reward function.
+        Execute one step in the environment using log-based reward function.
 
-        Reward = max_tile_value on the board after the action.
-        This simple reward function encourages the agent to create higher tiles.
+        Reward = log2(max_tile_value) on the board after the action.
+        This converts exponential tile growth into linear reward growth,
+        providing more stable training signals.
 
         Args:
             action: 0=Up, 1=Down, 2=Left, 3=Right
@@ -77,8 +78,10 @@ class Game2048Env(gym.Env):
         # Update max tile
         self.max_tile = int(np.max(self.grid))
 
-        # ART-style reward: simply the max tile value
-        reward = float(self.max_tile)
+        # Log-based reward: log2(max_tile) converts exponential growth to linear
+        # e.g., tiles [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+        #       -> rewards [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        reward = float(np.log2(self.max_tile)) if self.max_tile > 0 else 0.0
 
         # Check if game is over (no valid moves)
         terminated = not self._has_valid_moves()
