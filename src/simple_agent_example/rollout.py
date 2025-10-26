@@ -11,8 +11,8 @@ from .tinker_client import ChatMessage, TinkerTrainableModel, Trajectory
 
 SYSTEM_PROMPT = (
     "You are an excellent 2048 player. Always choose the move most likely to combine tiles and "
-    "eventually reach 2048. Valid moves: left, right, up, down. Respond ONLY with an XML element "
-    "holding the move, e.g. <move>left</move>."
+    "eventually reach 2048. Think out loud inside a <think>...</think> block, then output the final "
+    "decision as a single <move>...</move> tag containing one of: left, right, up, down."
 )
 
 
@@ -22,8 +22,21 @@ def build_prompt(board_view: str) -> str:
         f"{SYSTEM_PROMPT}\n\n"
         "Current board:\n"
         f"{board_view}\n"
-        "Return your move exactly as an XML element, e.g. <move>left</move>."
+        "Return your answer using exactly:\n"
+        "<think>...</think>\n"
+        "<move>direction</move>"
     )
+
+
+def extract_move_xml(model_output: str) -> str:
+    """Extract <move>...</move> XML from the model output."""
+    import re
+
+    match = re.search(r"<move>\s*(up|down|left|right)\s*</move>", model_output, re.IGNORECASE)
+    if not match:
+        raise ValueError("No valid <move> tag found")
+    direction = match.group(1).lower()
+    return f"<move>{direction}</move>"
 
 
 async def rollout(
@@ -58,7 +71,8 @@ async def rollout(
         trajectory.steps.append(step_info)
 
         try:
-            apply_agent_move(game, assistant_message.content)
+            move_xml = extract_move_xml(assistant_message.content)
+            apply_agent_move(game, move_xml)
             move_count += 1
             if verbose:
                 print(assistant_message.content)

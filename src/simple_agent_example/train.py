@@ -60,7 +60,8 @@ async def train(args: argparse.Namespace) -> None:
 
     if args.resume_from:
         logging.info("Loading checkpoint %s", args.resume_from)
-        await model.load_checkpoint(args.resume_from)
+        resume_path = await model.load_checkpoint(args.resume_from)
+        logging.info("Loaded weights from %s", resume_path)
     else:
         await model.refresh_sampling_client()
 
@@ -109,11 +110,13 @@ async def train(args: argparse.Namespace) -> None:
                 wandb_run.log(summary, step=step)
 
             if args.save_checkpoints:
-                await model.save_checkpoint(name=f"step-{step:04d}")
+                path = await model.save_checkpoint(name=f"step-{step:04d}")
+                logging.info("Saved checkpoint to %s", path)
 
         if args.save_checkpoints:
             logging.info("Final checkpoint save")
-            await model.save_checkpoint(name="final")
+            path = await model.save_checkpoint(name="final")
+            logging.info("Final checkpoint stored at %s", path)
     finally:
         if wandb_run is not None:
             wandb_run.finish()

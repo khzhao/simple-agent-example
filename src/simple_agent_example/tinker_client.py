@@ -310,15 +310,19 @@ class TinkerTrainableModel:
             learning_rate,
         )
 
-    async def save_checkpoint(self, name: Optional[str] = None) -> None:
+    async def save_checkpoint(self, name: Optional[str] = None) -> str:
         label = name or f"checkpoint-step-{self._sampler_counter:04d}"
-        await asyncio.to_thread(
+        checkpoint = await asyncio.to_thread(
             lambda: self.training_client.save_state(name=label).result()
         )
+        return getattr(checkpoint, "path", label)
 
-    async def load_checkpoint(self, name: str) -> None:
-        await asyncio.to_thread(lambda: self.training_client.load_state(name).result())
+    async def load_checkpoint(self, name: str) -> str:
+        checkpoint = await asyncio.to_thread(
+            lambda: self.training_client.load_state(name).result()
+        )
         await self.refresh_sampling_client()
+        return getattr(checkpoint, "path", name)
 
     async def score_group(self, group: TrajectoryGroup) -> Any:
         """Placeholder for optional external scoring."""

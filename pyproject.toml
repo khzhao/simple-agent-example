@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 train-2048 = "simple_agent_example.train:main"
+sft-2048 = "simple_agent_example.sft:main"
 
 [build-system]
 requires = ["uv_build>=0.8.17,<0.9.0"]
