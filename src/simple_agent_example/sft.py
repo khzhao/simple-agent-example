@@ -84,6 +84,12 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=10,
+        help="Save intermediate adapters every N steps (0 disables).",
+    )
     parser.add_argument("--save-name", default="2048-sft-initializer")
     parser.add_argument("--tinker-api-key", default=None)
     parser.add_argument(
@@ -213,6 +219,15 @@ def main() -> None:
                 step + 1,
                 steps,
                 np.mean(losses[-args.log_every :]),
+            )
+
+        if args.checkpoint_every and (step + 1) % args.checkpoint_every == 0:
+            name = f"{args.save_name}-step{step + 1}"
+            checkpoint = training_client.save_state(name=name).result()
+            logging.info(
+                "Intermediate save '%s' -> %s",
+                name,
+                getattr(checkpoint, "path", "(unknown path)"),
             )
 
     preview_count = min(max(args.preview_samples, 0), len(records))

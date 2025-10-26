@@ -97,11 +97,14 @@ async def train(args: argparse.Namespace) -> None:
                     args.dump_trajectories,
                     limit=args.dump_trajectories_count,
                 )
-                logging.info(
-                    "Dumped %d sample trajectories to %s",
-                    dumped,
-                    args.dump_trajectories,
-                )
+            logging.info(
+                "Dumped %d sample trajectories to %s",
+                dumped,
+                args.dump_trajectories,
+            )
+
+            if args.preview_samples and step == args.start_step:
+                _log_sample_outputs(groups, args.preview_samples)
 
             logging.info("Training on %s trajectory group(s)", len(groups))
             train_stats = await model.train(groups, learning_rate=args.learning_rate)
@@ -235,6 +238,39 @@ def _trajectory_to_dict(trajectory) -> dict:
     }
 
 
+def _log_sample_outputs(groups, limit: int) -> None:
+    count = 0
+    for group in groups:
+        for trajectory in group:
+            first_board = next(
+                (m.content for m in trajectory.messages if m.role == "user"),
+                "",
+            )
+            last_reply = next(
+                (
+                    m.content
+                    for m in reversed(trajectory.messages)
+                    if m.role == "assistant"
+                ),
+                "",
+            )
+            logging.info(
+                "Preview trajectory %d | reward=%.3f | invalid=%s",
+                count + 1,
+                trajectory.reward,
+                bool(trajectory.metrics.get("invalid_move")),
+            )
+            if first_board:
+                logging.info("Board:\n%s", first_board)
+            if last_reply:
+                logging.info("Assistant:\n%s", last_reply)
+            count += 1
+            if count >= limit:
+                return
+
+    logging.info("Only %d trajectories available for preview", count)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a Tinker LoRA policy on 2048.")
     parser.add_argument(
@@ -253,8 +289,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--rank", type=int, default=8)
-    parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--temperature", type=float, default=0.5)
+    parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-tokens", type=int, default=200)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
@@ -267,6 +303,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-checkpoints", action="store_true")
     parser.add_argument("--dump-trajectories")
     parser.add_argument("--dump-trajectories-count", type=int, default=3)
+    parser.add_argument(
+        "--preview-samples",
+        type=int,
+        default=0,
+        help="Log up to this many trajectory responses after the first gather.",
+    )
     parser.add_argument("--enable-ruler", action="store_true")
     parser.add_argument("--verbose-rollouts", action="store_true")
     return parser

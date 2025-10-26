@@ -88,15 +88,18 @@ async def rollout(
             move_xml = extract_move_xml(assistant_message.content)
             apply_agent_move(game, move_xml)
             move_count += 1
+            trajectory.metrics.setdefault("valid_actions", 0)
+            trajectory.metrics["valid_actions"] += 1
             if verbose:
                 print("Assistant response:")
                 print(_format_response(assistant_message.content))
         except ValueError:
             trajectory.metrics["invalid_move"] = 1
-            trajectory.reward = -1.0
+            penalty = -1.0 + 0.01 * trajectory.metrics.get("valid_actions", 0)
+            trajectory.reward = penalty
             invalid_move = True
             if trajectory.steps:
-                trajectory.steps[-1].reward = -1.0
+                trajectory.steps[-1].reward = penalty
                 trajectory.steps[-1].done = True
             break
 
@@ -123,6 +126,8 @@ async def rollout(
         }
     )
 
+    valid_actions = trajectory.metrics.get("valid_actions", 0)
+
     if not invalid_move:
         if agent_won:
             trajectory.reward = 2.0
@@ -134,6 +139,7 @@ async def rollout(
                 math.log(WINNING_VALUE * 16, 2) - 1
             )
             trajectory.reward = max_value_reward + (board_value_reward * 0.2)
+        trajectory.reward += 0.01 * valid_actions
 
     if trajectory.steps:
         for step_info in trajectory.steps:
@@ -141,7 +147,7 @@ async def rollout(
 
     if verbose:
         print(
-            f"Reward: {trajectory.reward:.3f} | Max tile: {max_value} | Board value: {board_value}"
+            f"Reward: {trajectory.reward:.3f} | Max tile: {max_value} | Board value: {board_value} | Valid actions: {valid_actions}"
         )
 
     return trajectory
