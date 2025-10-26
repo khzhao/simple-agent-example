@@ -7,18 +7,21 @@ import asyncio
 import logging
 import os
 
+import numpy as np
 from dotenv import load_dotenv
 
+try:
+    import wandb
+except ImportError:  # pragma: no cover - optional dependency
+    wandb = None
+
 from .rollout import rollout
-from .tinker_client import (
-    TinkerTrainableModel,
-    gather_trajectory_groups,
-    environment_seed,
-)
+from .tinker_client import (TinkerTrainableModel, environment_seed,
+                            gather_trajectory_groups)
 
 DEFAULT_TRAIN_STEPS = 40
 DEFAULT_SIMULTANEOUS_GAMES = 18
-DEFAULT_LEARNING_RATE = 1e-5
+DEFAULT_LEARNING_RATE = 1e-4
 
 
 async def train(args: argparse.Namespace) -> None:
@@ -40,48 +43,146 @@ async def train(args: argparse.Namespace) -> None:
         eps=args.adam_eps,
     )
 
+    use_wandb = not args.no_wandb
+    wandb_run = None
+    if use_wandb:
+        if wandb is None:
+            raise ImportError(
+                "wandb is not installed. Install it with `pip install wandb` or rerun with --no-wandb."
+            )
+        wandb_project = args.wandb_project or args.project
+        wandb_config = vars(args).copy()
+        wandb_run = wandb.init(
+            project=wandb_project,
+            name=args.wandb_run_name,
+            config=wandb_config,
+        )
+
     if args.resume_from:
         logging.info("Loading checkpoint %s", args.resume_from)
         await model.load_checkpoint(args.resume_from)
     else:
         await model.refresh_sampling_client()
 
-    for step in range(args.start_step, args.train_steps):
-        logging.info("Collecting trajectories for step %s", step)
+    try:
+        for step in range(args.start_step, args.train_steps):
+            logging.info("Collecting trajectories for step %s", step)
 
-        groups = await gather_trajectory_groups(
-            [
+            groups = await gather_trajectory_groups(
                 [
-                    rollout(
-                        model,
-                        step,
-                        is_validation=False,
-                        verbose=args.verbose_rollouts,
-                    )
-                    for _ in range(args.simultaneous_games)
-                ]
-            ],
-            after_each=model.score_group if args.enable_ruler else None,
-        )
+                    [
+                        rollout(
+                            model,
+                            step,
+                            is_validation=False,
+                            verbose=args.verbose_rollouts,
+                        )
+                        for _ in range(args.simultaneous_games)
+                    ]
+                ],
+                after_each=model.score_group if args.enable_ruler else None,
+            )
 
-        if not groups:
-            logging.warning("No trajectories gathered for step %s; skipping update", step)
-            continue
+            if not groups:
+                logging.warning(
+                    "No trajectories gathered for step %s; skipping update", step
+                )
+                continue
 
-        logging.info("Training on %s trajectory group(s)", len(groups))
-        await model.train(groups, learning_rate=args.learning_rate)
+            logging.info("Training on %s trajectory group(s)", len(groups))
+            train_stats = await model.train(groups, learning_rate=args.learning_rate)
+
+            if wandb_run is not None:
+                summary = _summarize_trajectories(groups)
+                summary.update(
+                    {
+                        "training/num_datums": train_stats.get("num_datums", 0.0),
+                        "training/trainable_groups": train_stats.get(
+                            "trainable_groups", 0.0
+                        ),
+                        "training/submitted_groups": train_stats.get(
+                            "submitted_groups", 0.0
+                        ),
+                        "training/learning_rate": args.learning_rate,
+                    }
+                )
+                wandb_run.log(summary, step=step)
+
+            if args.save_checkpoints:
+                await model.save_checkpoint(name=f"step-{step:04d}")
 
         if args.save_checkpoints:
-            await model.save_checkpoint(name=f"step-{step:04d}")
+            logging.info("Final checkpoint save")
+            await model.save_checkpoint(name="final")
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
-    if args.save_checkpoints:
-        logging.info("Final checkpoint save")
-        await model.save_checkpoint(name="final")
+
+def _summarize_trajectories(groups: list) -> dict[str, float]:
+    trajectories = [trajectory for group in groups for trajectory in group]
+    if not trajectories:
+        return {}
+
+    rewards = np.array([trajectory.reward for trajectory in trajectories])
+    win_flags = np.array(
+        [
+            float(bool(trajectory.metrics.get("win", False)))
+            for trajectory in trajectories
+        ]
+    )
+    moves = [
+        trajectory.metrics.get("num_moves")
+        for trajectory in trajectories
+        if trajectory.metrics.get("num_moves") is not None
+    ]
+    max_tiles = [
+        trajectory.metrics.get("max_value")
+        for trajectory in trajectories
+        if trajectory.metrics.get("max_value") is not None
+    ]
+    board_values = [
+        trajectory.metrics.get("board_value")
+        for trajectory in trajectories
+        if trajectory.metrics.get("board_value") is not None
+    ]
+    invalids = [
+        trajectory.metrics.get("invalid_move", 0) for trajectory in trajectories
+    ]
+
+    summary: dict[str, float] = {
+        "reward/mean": float(rewards.mean()),
+        "reward/std": float(rewards.std()),
+        "reward/min": float(rewards.min()),
+        "reward/max": float(rewards.max()),
+        "rollouts/count": float(len(trajectories)),
+        "win/rate": float(win_flags.mean() if win_flags.size else 0.0),
+        "invalid/frequency": (
+            float(np.array(invalids, dtype=float).mean()) if invalids else 0.0
+        ),
+    }
+
+    if moves:
+        moves_array = np.array(moves, dtype=float)
+        summary["moves/mean"] = float(moves_array.mean())
+        summary["moves/std"] = float(moves_array.std())
+    if max_tiles:
+        tiles_array = np.array(max_tiles, dtype=float)
+        summary["max_tile/mean"] = float(tiles_array.mean())
+        summary["max_tile/max"] = float(tiles_array.max())
+    if board_values:
+        board_array = np.array(board_values, dtype=float)
+        summary["board_value/mean"] = float(board_array.mean())
+        summary["board_value/max"] = float(board_array.max())
+
+    return summary
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a Tinker LoRA policy on 2048.")
-    parser.add_argument("--model-name", default=os.getenv("TINKER_MODEL_NAME", "tutorial-001"))
+    parser.add_argument(
+        "--model-name", default=os.getenv("TINKER_MODEL_NAME", "tutorial-001")
+    )
     parser.add_argument("--project", default=os.getenv("TINKER_PROJECT_NAME", "2048"))
     parser.add_argument(
         "--base-model",
@@ -90,7 +191,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", default=os.getenv("TINKER_API_KEY"))
     parser.add_argument("--train-steps", type=int, default=DEFAULT_TRAIN_STEPS)
     parser.add_argument("--start-step", type=int, default=0)
-    parser.add_argument("--simultaneous-games", type=int, default=DEFAULT_SIMULTANEOUS_GAMES)
+    parser.add_argument(
+        "--simultaneous-games", type=int, default=DEFAULT_SIMULTANEOUS_GAMES
+    )
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -101,6 +204,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adam-eps", type=float, default=1e-8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume-from")
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-run-name")
+    parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--save-checkpoints", action="store_true")
     parser.add_argument("--enable-ruler", action="store_true")
     parser.add_argument("--verbose-rollouts", action="store_true")

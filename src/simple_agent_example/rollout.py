@@ -4,16 +4,10 @@ from __future__ import annotations
 
 import math
 
-from .env import (
-    WINNING_VALUE,
-    apply_agent_move,
-    check_game_finished,
-    generate_game,
-    max_cell_value,
-    render_board,
-    total_board_value,
-)
-from .tinker_client import ChatMessage, Trajectory, TinkerTrainableModel
+from .env import (WINNING_VALUE, apply_agent_move, check_game_finished,
+                  generate_game, max_cell_value, render_board,
+                  total_board_value)
+from .tinker_client import ChatMessage, TinkerTrainableModel, Trajectory
 
 SYSTEM_PROMPT = (
     "You are an excellent 2048 player. Always choose the move most likely to combine tiles and "
@@ -100,7 +94,9 @@ async def rollout(
         if agent_won:
             trajectory.reward = 2.0
         else:
-            max_value_reward = (math.log(max_value, 2) - 1) / (math.log(WINNING_VALUE, 2) - 1)
+            max_value_reward = (math.log(max_value, 2) - 1) / (
+                math.log(WINNING_VALUE, 2) - 1
+            )
             board_value_reward = (math.log(board_value, 2) - 1) / (
                 math.log(WINNING_VALUE * 16, 2) - 1
             )

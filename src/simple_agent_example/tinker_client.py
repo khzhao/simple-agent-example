@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Iterable, Literal, Optional
+from typing import Any, Awaitable, Iterable, Literal, Optional
 
 import numpy as np
-import torch
 import tinker
+import torch
 from tinker import ServiceClient
 from tinker import types as t_types
 
@@ -95,6 +95,7 @@ class TinkerTrainableModel:
 
         self._sampling_client = None
         self._sampler_counter = 0
+        self._last_train_stats: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Sampling utilities
@@ -108,14 +109,18 @@ class TinkerTrainableModel:
 
     def _ensure_sampling_client(self) -> None:
         if self._sampling_client is None:
-            self._sampling_client = self.training_client.save_weights_and_get_sampling_client(
-                name=f"sampler-{self._sampler_counter}"
+            self._sampling_client = (
+                self.training_client.save_weights_and_get_sampling_client(
+                    name=f"sampler-{self._sampler_counter}"
+                )
             )
             self._sampler_counter += 1
 
     def _refresh_sampling_client(self) -> None:
-        self._sampling_client = self.training_client.save_weights_and_get_sampling_client(
-            name=f"sampler-{self._sampler_counter}"
+        self._sampling_client = (
+            self.training_client.save_weights_and_get_sampling_client(
+                name=f"sampler-{self._sampler_counter}"
+            )
         )
         self._sampler_counter += 1
 
@@ -192,7 +197,9 @@ class TinkerTrainableModel:
         target_tokens = tinker.TensorData.from_torch(target_tokens_tensor)
 
         scaled_advantage = advantage * weight
-        advantages = [0.0] * len(prompt_tokens) + [scaled_advantage] * len(response_tokens)
+        advantages = [0.0] * len(prompt_tokens) + [scaled_advantage] * len(
+            response_tokens
+        )
         advantages_tensor = torch.tensor(advantages, dtype=torch.float32)
         advantages_data = tinker.TensorData.from_torch(advantages_tensor)
 
@@ -215,15 +222,17 @@ class TinkerTrainableModel:
         learning_rate: float,
     ) -> None:
         datums: list[tinker.Datum] = []
+        submitted_groups = 0
+        trainable_groups = 0
 
         for group in trajectory_groups:
-            rewards = [
-                trajectory.reward
-                for trajectory in group
-                if trajectory.steps
-            ]
+            if not group:
+                continue
+            submitted_groups += 1
+            rewards = [trajectory.reward for trajectory in group if trajectory.steps]
             if len(rewards) < 2:
                 continue
+            trainable_groups += 1
             reward_mean = float(np.mean(rewards))
             reward_std = float(np.std(rewards))
             normalize = reward_std if reward_std > 1e-6 else 1.0
@@ -236,7 +245,9 @@ class TinkerTrainableModel:
                     continue
 
                 total_assistant_tokens = sum(
-                    len(step.response_tokens) for step in trajectory.steps if step.response_tokens
+                    len(step.response_tokens)
+                    for step in trajectory.steps
+                    if step.response_tokens
                 )
                 if total_assistant_tokens == 0:
                     continue
@@ -259,7 +270,12 @@ class TinkerTrainableModel:
                     )
 
         if not datums:
-            return
+            self._last_train_stats = {
+                "submitted_groups": float(submitted_groups),
+                "trainable_groups": float(trainable_groups),
+                "num_datums": 0.0,
+            }
+            return self._last_train_stats
 
         self.training_client.forward_backward(
             datums,
@@ -275,14 +291,20 @@ class TinkerTrainableModel:
         self.training_client.optim_step(adam_params).result()
 
         self._refresh_sampling_client()
+        self._last_train_stats = {
+            "submitted_groups": float(submitted_groups),
+            "trainable_groups": float(trainable_groups),
+            "num_datums": float(len(datums)),
+        }
+        return self._last_train_stats
 
     async def train(
         self,
         trajectory_groups: Iterable[TrajectoryGroup],
         *,
         learning_rate: float,
-    ) -> None:
-        await asyncio.to_thread(
+    ) -> dict[str, float]:
+        return await asyncio.to_thread(
             self._train_sync,
             trajectory_groups,
             learning_rate,

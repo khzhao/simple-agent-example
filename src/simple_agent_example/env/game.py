@@ -64,7 +64,11 @@ def render_board(game: TwentyFortyEightGame) -> str:
     lines: list[str] = []
     for row in board:
         cells = [
-            str(cell).rjust(max_cell_width) if cell is not None else "_".rjust(max_cell_width)
+            (
+                str(cell).rjust(max_cell_width)
+                if cell is not None
+                else "_".rjust(max_cell_width)
+            )
             for cell in row
         ]
         lines.append("|".join(cells))
@@ -132,7 +136,9 @@ def apply_agent_move(game: TwentyFortyEightGame, move_xml: str) -> None:
 
 def max_cell_value(game: TwentyFortyEightGame) -> int:
     """Return the largest tile value on the board."""
-    return max((cell for row in game["board"] for cell in row if cell is not None), default=0)
+    return max(
+        (cell for row in game["board"] for cell in row if cell is not None), default=0
+    )
 
 
 def total_board_value(game: TwentyFortyEightGame) -> int:
@@ -147,4 +153,3 @@ def check_game_finished(game: TwentyFortyEightGame) -> bool:
 
     has_empty = any(cell is None for row in game["board"] for cell in row)
     return not has_empty
-
