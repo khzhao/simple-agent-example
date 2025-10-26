@@ -130,7 +130,10 @@ def apply_agent_move(game: TwentyFortyEightGame, move_xml: str) -> None:
     except ValueError as exc:
         raise ValueError("Invalid direction") from exc
 
+    before = [row[:] for row in game["board"]]
     _condense_in_place(game, direction)
+    if game["board"] == before:
+        raise ValueError("Move did not change board")
     populate_random_cell(game)
 
 

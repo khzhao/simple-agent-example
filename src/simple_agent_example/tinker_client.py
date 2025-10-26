@@ -66,7 +66,7 @@ class TinkerTrainableModel:
         rank: int = 8,
         temperature: float = 0.2,
         top_p: float = 0.95,
-        max_tokens: int = 16,
+        max_tokens: int = 200,
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
@@ -149,10 +149,10 @@ class TinkerTrainableModel:
 
         sequence = result.sequences[0]
         response_tokens = list(sequence.tokens)
-        logprobs = list(getattr(sequence, "logprobs", [0.0] * len(response_tokens)))
         response_text = self.tokenizer.decode(
             response_tokens, skip_special_tokens=True
         ).strip()
+        logprobs = list(getattr(sequence, "logprobs", [0.0] * len(response_tokens)))
 
         message = ChatMessage(role="assistant", content=response_text)
         step = TrajectoryStep(

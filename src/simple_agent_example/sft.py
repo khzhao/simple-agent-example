@@ -92,6 +92,30 @@ def main() -> None:
         choices=["debug", "info", "warning", "error", "critical"],
         help="Logging verbosity.",
     )
+    parser.add_argument(
+        "--preview-samples",
+        type=int,
+        default=3,
+        help="Number of dataset prompts to preview after training (0 disables).",
+    )
+    parser.add_argument(
+        "--preview-max-tokens",
+        type=int,
+        default=128,
+        help="Maximum tokens to generate per preview completion.",
+    )
+    parser.add_argument(
+        "--preview-temperature",
+        type=float,
+        default=0.2,
+        help="Sampling temperature for preview generations.",
+    )
+    parser.add_argument(
+        "--preview-top-p",
+        type=float,
+        default=0.95,
+        help="Top-p nucleus sampling value for preview generations.",
+    )
     args = parser.parse_args()
 
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -190,6 +214,45 @@ def main() -> None:
                 steps,
                 np.mean(losses[-args.log_every :]),
             )
+
+    preview_count = min(max(args.preview_samples, 0), len(records))
+    if preview_count:
+        logging.info("Generating %d preview completions using latest weights", preview_count)
+        sampling_client = training_client.save_weights_and_get_sampling_client(
+            name=f"{args.save_name}-preview"
+        )
+        sampling_params = tinker.types.SamplingParams(
+            temperature=args.preview_temperature,
+            top_p=args.preview_top_p,
+            max_tokens=args.preview_max_tokens,
+            logprobs=False,
+        )
+        bos_token_id = tokenizer.bos_token_id
+        for idx, record in enumerate(records[:preview_count], start=1):
+            prompt = record["prompt"]
+            completion = record.get("completion", "")
+            prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
+            if bos_token_id is not None and (
+                not prompt_tokens or prompt_tokens[0] != bos_token_id
+            ):
+                prompt_tokens = [bos_token_id] + prompt_tokens
+            model_input = tinker.types.ModelInput.from_ints(prompt_tokens)
+            result = sampling_client.sample(
+                prompt=model_input,
+                num_samples=1,
+                sampling_params=sampling_params,
+            ).result()
+            if not getattr(result, "sequences", None):
+                logging.warning("Preview %d failed: no sequences returned", idx)
+                continue
+            sequence = result.sequences[0]
+            generated = tokenizer.decode(
+                getattr(sequence, "tokens", []),
+                skip_special_tokens=True,
+            ).strip()
+            logging.info("Preview %d prompt: %s", idx, prompt)
+            logging.info("Preview %d target completion: %s", idx, completion)
+            logging.info("Preview %d model completion: %s", idx, generated)
 
     checkpoint = training_client.save_state(name=args.save_name).result()
     logging.info(

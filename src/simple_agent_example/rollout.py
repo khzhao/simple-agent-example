@@ -9,10 +9,23 @@ from .env import (WINNING_VALUE, apply_agent_move, check_game_finished,
                   total_board_value)
 from .tinker_client import ChatMessage, TinkerTrainableModel, Trajectory
 
+
+def _format_board(board_view: str) -> str:
+    lines: list[str] = []
+    for raw_line in board_view.splitlines():
+        cells = [cell.strip() for cell in raw_line.split("|")]
+        pretty = " | ".join(f"{(cell if cell != '_' else '.'):>3}" for cell in cells)
+        lines.append(pretty)
+    return "\n".join(lines)
+
+
+def _format_response(content: str) -> str:
+    return "\n".join(f"    {line}" for line in content.splitlines())
+
 SYSTEM_PROMPT = (
-    "You are an excellent 2048 player. Always choose the move most likely to combine tiles and "
-    "eventually reach 2048. Think out loud inside a <think>...</think> block, then output the final "
-    "decision as a single <move>...</move> tag containing one of: left, right, up, down."
+    "You are an excellent 2048 player. Think through the board inside a <think>...</think> block, "
+    "then give the final move as <move>left</move>, <move>right</move>, <move>up</move>, or <move>down</move>. "
+    "Do not call tools. Do not emit <tool_call> or any metadata—respond only with the <think> and <move> tags."
 )
 
 
@@ -63,7 +76,8 @@ async def rollout(
         board_view = render_board(game)
         trajectory.messages.append(ChatMessage(role="user", content=board_view))
         if verbose:
-            print(board_view)
+            print(f"\n=== Step {move_count:02d} ===")
+            print(_format_board(board_view))
 
         prompt_text = build_prompt(board_view)
         assistant_message, step_info = await model.sample_action(prompt_text)
@@ -75,7 +89,8 @@ async def rollout(
             apply_agent_move(game, move_xml)
             move_count += 1
             if verbose:
-                print(assistant_message.content)
+                print("Assistant response:")
+                print(_format_response(assistant_message.content))
         except ValueError:
             trajectory.metrics["invalid_move"] = 1
             trajectory.reward = -1.0
@@ -90,6 +105,10 @@ async def rollout(
             if trajectory.steps:
                 trajectory.steps[-1].done = True
             break
+
+    if verbose:
+        print("\n=== Final Board ===")
+        print(_format_board(render_board(game)))
 
     max_value = max_cell_value(game)
     board_value = total_board_value(game)
@@ -119,5 +138,10 @@ async def rollout(
     if trajectory.steps:
         for step_info in trajectory.steps:
             step_info.reward = trajectory.reward
+
+    if verbose:
+        print(
+            f"Reward: {trajectory.reward:.3f} | Max tile: {max_value} | Board value: {board_value}"
+        )
 
     return trajectory

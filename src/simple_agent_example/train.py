@@ -255,7 +255,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--max-tokens", type=int, default=16)
+    parser.add_argument("--max-tokens", type=int, default=200)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
     parser.add_argument("--adam-eps", type=float, default=1e-8)
