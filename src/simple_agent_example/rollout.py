@@ -23,9 +23,12 @@ def _format_response(content: str) -> str:
     return "\n".join(f"    {line}" for line in content.splitlines())
 
 SYSTEM_PROMPT = (
-    "You are an excellent 2048 player. Think through the board inside a <think>...</think> block, "
-    "then give the final move as <move>left</move>, <move>right</move>, <move>up</move>, or <move>down</move>. "
-    "Do not call tools. Do not emit <tool_call> or any metadata—respond only with the <think> and <move> tags."
+    "You are an excellent 2048 player."
+    " Think silently inside a <think>...</think> block."
+    " After the reasoning, output exactly one <move>...</move> tag with left/right/up/down."
+    " Do not emit tool calls, JSON, explanations, or additional text."
+    " Your entire reply must consist of the <think> block immediately followed by the <move> block."
+    " You must absolutely follow the instructions above or else something very bad will happen to you."
 )
 
 

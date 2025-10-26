@@ -230,11 +230,15 @@ class TinkerTrainableModel:
                 continue
             submitted_groups += 1
             rewards = [trajectory.reward for trajectory in group if trajectory.steps]
-            if len(rewards) < 2:
+            if not rewards:
                 continue
             trainable_groups += 1
-            reward_mean = float(np.mean(rewards))
-            reward_std = float(np.std(rewards))
+            if len(rewards) > 1:
+                reward_mean = float(np.mean(rewards))
+                reward_std = float(np.std(rewards))
+            else:
+                reward_mean = 0.0
+                reward_std = 0.0
             normalize = reward_std if reward_std > 1e-6 else 1.0
 
             for trajectory in group:
