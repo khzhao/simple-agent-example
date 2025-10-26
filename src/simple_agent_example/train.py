@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 
@@ -89,6 +90,18 @@ async def train(args: argparse.Namespace) -> None:
                     "No trajectories gathered for step %s; skipping update", step
                 )
                 continue
+
+            if args.dump_trajectories and step == args.start_step:
+                dumped = _dump_sample_trajectories(
+                    groups,
+                    args.dump_trajectories,
+                    limit=args.dump_trajectories_count,
+                )
+                logging.info(
+                    "Dumped %d sample trajectories to %s",
+                    dumped,
+                    args.dump_trajectories,
+                )
 
             logging.info("Training on %s trajectory group(s)", len(groups))
             train_stats = await model.train(groups, learning_rate=args.learning_rate)
@@ -181,6 +194,47 @@ def _summarize_trajectories(groups: list) -> dict[str, float]:
     return summary
 
 
+def _dump_sample_trajectories(groups, path: str, limit: int = 3) -> int:
+    samples = []
+    for group in groups:
+        for trajectory in group:
+            samples.append(_trajectory_to_dict(trajectory))
+            if len(samples) >= limit:
+                break
+        if len(samples) >= limit:
+            break
+
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    with open(path, "w") as f:
+        json.dump(samples, f, indent=2)
+
+    return len(samples)
+
+
+def _trajectory_to_dict(trajectory) -> dict:
+    return {
+        "reward": trajectory.reward,
+        "metrics": trajectory.metrics,
+        "metadata": trajectory.metadata,
+        "messages": [
+            {"role": message.role, "content": message.content}
+            for message in trajectory.messages
+        ],
+        "steps": [
+            {
+                "prompt_text": step.prompt_text,
+                "response_text": step.response_text,
+                "reward": step.reward,
+                "done": step.done,
+            }
+            for step in trajectory.steps
+        ],
+    }
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a Tinker LoRA policy on 2048.")
     parser.add_argument(
@@ -211,6 +265,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb-run-name")
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--save-checkpoints", action="store_true")
+    parser.add_argument("--dump-trajectories")
+    parser.add_argument("--dump-trajectories-count", type=int, default=3)
     parser.add_argument("--enable-ruler", action="store_true")
     parser.add_argument("--verbose-rollouts", action="store_true")
     return parser
