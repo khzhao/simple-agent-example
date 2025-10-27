@@ -594,13 +594,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--temperature",
         type=float,
         default=0.2,
-        help="Sampling temperature for teacher completions.",
+        help="Sampling temperature for teacher completions (use 1.0 for o1/o1-mini models).",
     )
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=128,
-        help="Maximum tokens per teacher completion.",
+        default=512,
+        help="Maximum completion tokens per teacher response.",
     )
     parser.add_argument(
         "--log-level",

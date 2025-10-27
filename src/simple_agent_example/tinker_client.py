@@ -324,7 +324,7 @@ class TinkerTrainableModel:
 
         self.training_client.forward_backward(
             datums,
-            loss_fn="importance_sampling",
+            loss_fn="ppo",
         ).result()
 
         adam_params = tinker.AdamParams(

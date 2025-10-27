@@ -57,7 +57,7 @@ class OpenAIChatModel:
         model: str = "gpt-4o-mini",
         api_key: Optional[str] = None,
         temperature: float = 0.2,
-        max_output_tokens: int = 128,
+        max_output_tokens: int = 10000,
         system_prompt: Optional[str] = None,
     ) -> None:
         key = _ensure_openai_key(api_key)
@@ -82,12 +82,24 @@ class OpenAIChatModel:
         messages: Sequence[ChatMessage],
     ) -> ChatMessage:
         payload = self._convert_messages(messages)
-        response = await self._client.chat.completions.create(
-            model=self.model,
-            messages=payload,
-            temperature=self.temperature,
-            max_tokens=self.max_output_tokens,
-        )
+        
+        # Build API parameters - some models don't support temperature/max_completion_tokens
+        api_params = {
+            "model": self.model,
+            "messages": payload,
+        }
+        
+        # Only add temperature if not default (some models like o1 don't support it)
+        if self.temperature != 1.0:
+            api_params["temperature"] = self.temperature
+        elif self.max_output_tokens:
+            api_params["max_completion_tokens"] = self.max_output_tokens
+        
+        # Add max_completion_tokens if specified
+        if self.max_output_tokens:
+            api_params["max_tokens"] = self.max_output_tokens
+        
+        response = await self._client.chat.completions.create(**api_params)
         choice = response.choices[0]
         content = choice.message.content or ""
         return ChatMessage(role="assistant", content=content.strip())
@@ -102,7 +114,7 @@ class OpenAIRewardModel:
         model: str = "gpt-4o-mini",
         api_key: Optional[str] = None,
         temperature: float = 0.0,
-        max_output_tokens: int = 200,
+        max_output_tokens: int = 10000,
         system_prompt: Optional[str] = None,
     ) -> None:
         key = _ensure_openai_key(api_key)
@@ -158,12 +170,24 @@ class OpenAIRewardModel:
             teacher_response=teacher_response,
             student_response=student_response,
         )
-        response = await self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.max_output_tokens,
-        )
+        
+        # Build API parameters - some models don't support temperature/max_completion_tokens
+        api_params = {
+            "model": self.model,
+            "messages": messages,
+        }
+        
+        # Only add temperature if not default (some models like o1 don't support it)
+        if self.temperature != 1.0:
+            api_params["temperature"] = self.temperature
+        elif self.max_output_tokens:
+            api_params["max_tokens"] = self.max_output_tokens
+        
+        # Add max_completion_tokens if specified
+        if self.max_output_tokens:
+            api_params["max_tokens"] = self.max_output_tokens
+        
+        response = await self._client.chat.completions.create(**api_params)
         content = (response.choices[0].message.content or "").strip()
 
         parsed = _extract_json_object(content)

@@ -32,3 +32,6 @@ build/
 
 # Logs
 *.log
+
+# Data
+data/

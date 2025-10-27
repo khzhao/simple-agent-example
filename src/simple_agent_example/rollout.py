@@ -34,12 +34,58 @@ RESPONSE_PATTERN = re.compile(
 )
 
 SYSTEM_PROMPT = (
-    "You are an excellent 2048 player."
-    " Think silently inside a <think>...</think> block."
-    " After the reasoning, output exactly one <move>...</move> tag with left/right/up/down."
-    " Do not emit tool calls, JSON, explanations, or additional text."
-    " Your entire reply must consist of the <think> block immediately followed by the <move> block."
-    " You must absolutely follow the instructions above or else something very bad will happen to you."
+    "You are an expert 2048 player. Your goal is to merge tiles to create higher values and reach the 2048 tile (or beyond).\n\n"
+    
+    "GAME RULES:\n"
+    "- The board is 4x4 with numbered tiles (2, 4, 8, 16, 32, 64, 128, 256, 512, ..., 2048.)\n"
+    "- When you move, all tiles slide in that direction\n"
+    "- Tiles with the same number merge when they touch: 2+2=4, 4+4=8, 8+8=16, etc.\n"
+    "- After each move, a new tile (2 or 4) spawns in an empty cell\n"
+    "- The game ends when the board is full and no moves can merge tiles\n\n"
+    
+    "WINNING STRATEGY:\n"
+    "- Keep your highest tile in a corner (preferably bottom-right or bottom-left)\n"
+    "- Build tiles in descending order from the corner: e.g., 128→64→32→16→8\n"
+    "- Avoid moving away from your chosen corner unless absolutely necessary\n"
+    "- Always consider which direction will create the most merges\n"
+    "- Plan ahead: think about where the new tile will spawn and how it affects your strategy\n"
+    "- Avoid random moves that break your tile ordering\n\n"
+    
+    "OUTPUT FORMAT (CRITICAL):\n"
+    "Your response must contain exactly two XML tags in this order:\n"
+    "1. <think>your reasoning here</think>\n"
+    "2. <move>direction</move> where direction is one of: up, down, left, right\n\n"
+    
+    "In your <think> block, analyze:\n"
+    "- Current board state and highest tile location\n"
+    "- Which moves will create merges\n"
+    "- How each move affects your corner strategy\n"
+    "- Where a new tile might spawn and its impact\n\n"
+    
+    "CORRECT OUTPUT EXAMPLES:\n\n"
+    
+    "Example response 1:\n"
+    "<think>The highest tile is 64 in the bottom-left corner. I have a 32 above it and a 16 to its right, "
+    "creating a good descending chain. Moving left will slide the 4 and 4 together on the top row to create "
+    "an 8, and keep my corner strategy intact. Moving down would also work but left gives me an extra merge. "
+    "I'll avoid moving up or right as that would disrupt my corner positioning.</think>\n"
+    "<move>left</move>\n\n"
+    
+    "Example response 2:\n"
+    "<think>I see my highest tile is 128 in the bottom-right. The board has two pairs of 2s that can merge. "
+    "If I move right, both pairs will slide and merge: top row 2+2→4 and middle row 2+2→4. This creates space "
+    "and maintains my corner strategy with the 128. Down would also keep the corner but wouldn't merge as many tiles. "
+    "Right is the optimal move here.</think>\n"
+    "<move>right</move>\n\n"
+    
+    "Example response 3:\n"
+    "<think>The board has a 256 in the top-left corner with 128, 64, 32 descending to the right. This is a strong "
+    "position. I need to avoid moving down as it would bury my highest tiles. Moving left keeps everything aligned. "
+    "I see a 4 and 4 on the bottom row that will merge if I move left, which is an added bonus. Left maintains "
+    "structure and creates a merge.</think>\n"
+    "<move>left</move>\n\n"
+    
+    "Do not output anything else - no explanations, no JSON, no tool calls, just <think> followed by <move>."
 )
 
 
@@ -116,9 +162,10 @@ async def _sample_teacher_with_retry(
                 "Teacher response missing required <think>/<move> format."
             )
             logger.warning(
-                "Teacher produced invalid format on attempt %d/%d",
+                "Teacher produced invalid format on attempt %d/%d : %s",
                 attempt,
                 max_retries,
+                content,
             )
             current_prompt = (
                 f"{current_prompt}\n\nThe previous response was invalid: {content!r}"
