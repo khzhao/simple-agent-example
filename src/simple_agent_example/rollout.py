@@ -32,6 +32,7 @@ WIN_REWARD = 2.0
 FORMAT_ACCEPT_THRESHOLD = 0.95
 INVALID_PENALTY_SCALE = 3.0
 EXPECTED_FORMAT_CANONICAL = "<think></think><move>direction</move>"
+EXPECTED_TAG_SEQUENCE: tuple[str, ...] = ("<think>", "</think>", "<move>", "</move>")
 RESPONSE_PATTERN = re.compile(
     r"^<think>.*?</think>\s*<move>(up|down|left|right)</move>$",
     re.IGNORECASE | re.DOTALL,
@@ -51,12 +52,88 @@ def _canonicalize_for_similarity(raw_text: str) -> str:
     return cleaned
 
 
-def _format_similarity(raw_text: str) -> float:
-    canonical = _canonicalize_for_similarity(raw_text)
-    if not canonical:
+def _extract_think_content(raw_text: str) -> str:
+    match = re.search(r"<think>(.*?)</think>", raw_text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _tag_sequence(raw_text: str) -> list[str]:
+    return re.findall(r"</?think>|</?move>", raw_text, flags=re.IGNORECASE)
+
+
+def _token_bigram_jaccard(raw_text: str, reference: tuple[str, ...]) -> float:
+    tokens = re.findall(r"[a-z]+|</?think>|</?move>", raw_text, flags=re.IGNORECASE)
+    tokens = [token.lower() for token in tokens]
+    if len(tokens) < 2:
         return 0.0
-    ratio = difflib.SequenceMatcher(None, canonical, EXPECTED_FORMAT_CANONICAL).ratio()
-    return float(max(0.0, min(1.0, ratio)))
+    bigrams = {tuple(tokens[i : i + 2]) for i in range(len(tokens) - 1)}
+    ref_bigrams = {tuple(reference[i : i + 2]) for i in range(len(reference) - 1)}
+    union = bigrams | ref_bigrams
+    if not union:
+        return 0.0
+    return len(bigrams & ref_bigrams) / len(union)
+
+
+def _noise_penalty(raw_text: str) -> float:
+    stripped = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.IGNORECASE | re.DOTALL)
+    stripped = re.sub(r"<move>.*?</move>", "", stripped, flags=re.IGNORECASE | re.DOTALL)
+    leftover = stripped.strip()
+    if not leftover:
+        return 0.0
+    return min(0.4, len(leftover) / 200.0)
+
+
+def _format_similarity(raw_text: str) -> float:
+    text = raw_text.strip()
+    if not text:
+        return 0.0
+
+    lowered = text.lower()
+    canonical = _canonicalize_for_similarity(lowered)
+    canonical_ratio = difflib.SequenceMatcher(
+        None, canonical, EXPECTED_FORMAT_CANONICAL
+    ).ratio()
+
+    structure_match = 1.0 if RESPONSE_PATTERN.fullmatch(text) else 0.0
+
+    tag_seq = [token.lower() for token in _tag_sequence(lowered)]
+    tag_alignment = (
+        difflib.SequenceMatcher(None, tag_seq, EXPECTED_TAG_SEQUENCE).ratio()
+        if tag_seq
+        else 0.0
+    )
+    bigram_jaccard = _token_bigram_jaccard(lowered, tuple(token.lower() for token in EXPECTED_TAG_SEQUENCE))
+
+    think_present = 1.0 if re.search(r"<think>.*?</think>", lowered, re.DOTALL) else 0.0
+    move_present = 1.0 if re.search(r"<move>.*?</move>", lowered, re.DOTALL) else 0.0
+
+    think_content = _extract_think_content(lowered)
+    if think_content:
+        tokens = re.findall(r"[a-z]+", think_content)
+        unique_tokens = len(set(tokens))
+        diversity = unique_tokens / len(tokens) if tokens else 0.0
+        length_score = min(1.0, len(think_content) / 40.0)
+    else:
+        tokens = []
+        diversity = 0.0
+        length_score = 0.0
+
+    noise = _noise_penalty(lowered)
+
+    tag_presence = 0.5 * (think_present + move_present)
+    similarity = (
+        0.3 * structure_match
+        + 0.2 * canonical_ratio
+        + 0.15 * tag_alignment
+        + 0.1 * bigram_jaccard
+        + 0.1 * length_score
+        + 0.05 * diversity
+        + 0.1 * tag_presence
+    )
+    similarity = max(0.0, min(1.0, similarity - noise))
+    return similarity
 
 
 def _invalid_reward(valid_actions: int, format_similarity: float) -> float:
