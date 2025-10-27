@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence
 from dotenv import load_dotenv
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from .tinker_client import ChatMessage
 
@@ -49,7 +49,7 @@ class RewardResult:
 
 
 class OpenAIChatModel:
-    """Thin wrapper around OpenAI chat completions for teacher rollouts."""
+    """Thin wrapper around OpenAI chat completions for teacher rollouts using native async."""
 
     def __init__(
         self,
@@ -61,7 +61,7 @@ class OpenAIChatModel:
         system_prompt: Optional[str] = None,
     ) -> None:
         key = _ensure_openai_key(api_key)
-        self._client = OpenAI(api_key=key)
+        self._client = AsyncOpenAI(api_key=key)
         self.model = model
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
@@ -77,9 +77,12 @@ class OpenAIChatModel:
             converted.append({"role": message.role, "content": message.content})
         return converted
 
-    def _call(self, messages: Sequence[ChatMessage]) -> ChatMessage:
+    async def sample_action(
+        self,
+        messages: Sequence[ChatMessage],
+    ) -> ChatMessage:
         payload = self._convert_messages(messages)
-        response = self._client.chat.completions.create(
+        response = await self._client.chat.completions.create(
             model=self.model,
             messages=payload,
             temperature=self.temperature,
@@ -89,15 +92,9 @@ class OpenAIChatModel:
         content = choice.message.content or ""
         return ChatMessage(role="assistant", content=content.strip())
 
-    async def sample_action(
-        self,
-        messages: Sequence[ChatMessage],
-    ) -> ChatMessage:
-        return await asyncio.to_thread(self._call, messages)
-
 
 class OpenAIRewardModel:
-    """Use an OpenAI model to score student responses against a teacher."""
+    """Use an OpenAI model to score student responses against a teacher using native async."""
 
     def __init__(
         self,
@@ -109,7 +106,7 @@ class OpenAIRewardModel:
         system_prompt: Optional[str] = None,
     ) -> None:
         key = _ensure_openai_key(api_key)
-        self._client = OpenAI(api_key=key)
+        self._client = AsyncOpenAI(api_key=key)
         self.model = model
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
@@ -149,7 +146,7 @@ class OpenAIRewardModel:
             {"role": "user", "content": user_prompt},
         ]
 
-    def _call(
+    async def score(
         self,
         *,
         board_view: str,
@@ -161,7 +158,7 @@ class OpenAIRewardModel:
             teacher_response=teacher_response,
             student_response=student_response,
         )
-        response = self._client.chat.completions.create(
+        response = await self._client.chat.completions.create(
             model=self.model,
             messages=messages,
             temperature=self.temperature,
@@ -184,17 +181,3 @@ class OpenAIRewardModel:
             score_value = 0.0
         score_value = max(0.0, min(1.0, score_value))
         return RewardResult(score=score_value, reasoning=str(reasoning))
-
-    async def score(
-        self,
-        *,
-        board_view: str,
-        teacher_response: str,
-        student_response: str,
-    ) -> RewardResult:
-        return await asyncio.to_thread(
-            self._call,
-            board_view=board_view,
-            teacher_response=teacher_response,
-            student_response=student_response,
-        )

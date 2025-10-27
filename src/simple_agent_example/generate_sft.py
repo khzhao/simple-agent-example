@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class WorkerStats:
+    """Statistics for a single worker."""
+    
+    worker_id: int
+    examples: int = 0
+    games: int = 0
+    api_calls: int = 0
+    attempts: int = 0
+    format_failures: int = 0
+    noop_failures: int = 0
+    invalid_move_failures: int = 0
+    api_errors: int = 0
+    abandoned_games: int = 0
+    completed_games: int = 0
+
+
+@dataclass
 class GenerationStats:
     """Track statistics during SFT generation."""
 
@@ -37,6 +54,22 @@ class GenerationStats:
     api_errors: int = 0
     abandoned_games: int = 0
     completed_games: int = 0
+
+    @classmethod
+    def from_worker_stats(cls, worker_stats: list[WorkerStats]) -> GenerationStats:
+        """Aggregate statistics from multiple workers."""
+        return cls(
+            total_examples=sum(w.examples for w in worker_stats),
+            total_games=sum(w.games for w in worker_stats),
+            total_api_calls=sum(w.api_calls for w in worker_stats),
+            total_attempts=sum(w.attempts for w in worker_stats),
+            format_failures=sum(w.format_failures for w in worker_stats),
+            noop_failures=sum(w.noop_failures for w in worker_stats),
+            invalid_move_failures=sum(w.invalid_move_failures for w in worker_stats),
+            api_errors=sum(w.api_errors for w in worker_stats),
+            abandoned_games=sum(w.abandoned_games for w in worker_stats),
+            completed_games=sum(w.completed_games for w in worker_stats),
+        )
 
     def log_summary(self) -> None:
         """Log comprehensive statistics summary."""
@@ -192,9 +225,10 @@ async def _play_game_for_sft(
     log_every: int,
 ) -> int:
     """
-    Play a single game and collect SFT examples.
+    Play a complete game and collect all SFT examples from it.
     
     Returns the number of examples collected from this game.
+    Note: This always plays the complete game regardless of target.
     """
     game = generate_game()
     stats.total_games += 1
@@ -203,7 +237,8 @@ async def _play_game_for_sft(
     
     logger.debug("Starting game %d (id=%s)", stats.total_games, game_id)
     
-    while stats.total_examples < target_examples:
+    # Play until game finishes (no mid-game stopping)
+    while True:
         board_view = render_board(game)
         
         # Get a valid move from teacher
@@ -254,24 +289,245 @@ async def _play_game_for_sft(
         
         # Check if game is finished
         if check_game_finished(game):
-            logger.debug("Game %d (id=%s) completed after %d steps",
-                        stats.total_games, game_id, examples_from_game)
+            logger.info(
+                "Game %d (id=%s) completed after %d steps | total examples: %d",
+                stats.total_games,
+                game_id,
+                examples_from_game,
+                stats.total_examples,
+            )
             stats.completed_games += 1
             return examples_from_game
+
+
+async def _play_single_game(
+    teacher: OpenAIChatModel,
+    file_handle,
+) -> tuple[int, WorkerStats]:
+    """
+    Play a single complete game and collect SFT examples.
     
-    # Reached target examples mid-game
-    logger.debug("Game %d (id=%s) interrupted at %d steps (target reached)",
-                stats.total_games, game_id, examples_from_game)
-    stats.completed_games += 1
-    return examples_from_game
+    Returns tuple of (examples_collected, game_stats).
+    """
+    game = generate_game()
+    game_id = game["id"]
+    examples_from_game = 0
+    
+    # Local stats for this game
+    game_stats = WorkerStats(worker_id=0)
+    game_stats.games = 1
+    
+    logger.debug("Starting game (id=%s)", game_id)
+    
+    while True:
+        board_view = render_board(game)
+        
+        # Get a valid move from teacher
+        move_result = await _attempt_valid_move(teacher, game, board_view)
+        
+        # Update statistics
+        game_stats.api_calls += move_result.attempts
+        game_stats.attempts += move_result.attempts
+        game_stats.format_failures += move_result.format_failures
+        game_stats.noop_failures += move_result.noop_failures
+        game_stats.invalid_move_failures += move_result.invalid_move_failures
+        game_stats.api_errors += move_result.api_errors
+        
+        # Check if we got a valid move
+        if not move_result.success:
+            logger.warning("Abandoning game (id=%s) after %d steps - no valid move",
+                          game_id, examples_from_game)
+            game_stats.abandoned_games = 1
+            game_stats.examples = examples_from_game
+            return examples_from_game, game_stats
+        
+        # Create and write SFT record
+        student_prompt = build_prompt(board_view)
+        record = {
+            "prompt": student_prompt,
+            "completion": move_result.content,
+        }
+        _write_record(file_handle, record)
+        
+        examples_from_game += 1
+        
+        logger.debug(
+            "Example collected (game %s step %d) | attempts=%d | format_fail=%d | noop_fail=%d | invalid_fail=%d",
+            game_id, examples_from_game,
+            move_result.attempts, move_result.format_failures,
+            move_result.noop_failures, move_result.invalid_move_failures,
+        )
+        
+        # Apply the move to advance game state
+        apply_agent_move(game, move_result.move_xml)
+        
+        # Check if game is finished
+        if check_game_finished(game):
+            logger.debug("Game (id=%s) completed after %d steps", game_id, examples_from_game)
+            game_stats.completed_games = 1
+            game_stats.examples = examples_from_game
+            return examples_from_game, game_stats
+
+
+async def _worker_generate_sft(
+    worker_id: int,
+    teacher: OpenAIChatModel,
+    target_examples: int,
+    output_path: Path,
+    log_every: int,
+) -> WorkerStats:
+    """
+    Worker function that generates SFT examples and writes to its own file.
+    
+    Each worker writes to a separate file: output_path.worker_{worker_id}.jsonl
+    """
+    worker_file = output_path.parent / f"{output_path.stem}.worker_{worker_id}.jsonl"
+    stats = WorkerStats(worker_id=worker_id)
+    
+    logger.info("Worker %d starting | target=%d examples | output=%s",
+                worker_id, target_examples, worker_file.name)
+    
+    with worker_file.open("w", encoding="utf-8") as handle:
+        while stats.examples < target_examples:
+            examples_collected, game_stats = await _play_single_game(teacher, handle)
+            
+            # Aggregate game stats into worker stats
+            stats.examples += game_stats.examples
+            stats.games += game_stats.games
+            stats.api_calls += game_stats.api_calls
+            stats.attempts += game_stats.attempts
+            stats.format_failures += game_stats.format_failures
+            stats.noop_failures += game_stats.noop_failures
+            stats.invalid_move_failures += game_stats.invalid_move_failures
+            stats.api_errors += game_stats.api_errors
+            stats.abandoned_games += game_stats.abandoned_games
+            stats.completed_games += game_stats.completed_games
+            
+            # Log progress
+            if stats.examples > 0 and stats.examples % log_every == 0:
+                logger.info("Worker %d: %d / %d examples collected",
+                           worker_id, stats.examples, target_examples)
+    
+    logger.info("Worker %d complete: %d examples in %d games",
+                worker_id, stats.examples, stats.games)
+    return stats
+
+
+async def _generate_examples_parallel(args: argparse.Namespace) -> None:
+    """Generate SFT examples by continuously spawning game tasks until target is reached."""
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        force=True,
+    )
+    
+    logging.getLogger().setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
+    
+    # Prepare output directory
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    max_concurrent = args.workers
+    target_examples = args.examples
+    
+    logger.info("Starting parallel SFT generation: target=%d examples, max_concurrent=%d, model=%s",
+                target_examples, max_concurrent, args.teacher_model)
+    logger.info("Strategy: Continuously spawn game tasks until target reached")
+    
+    # Shared state
+    total_examples = 0
+    game_counter = 0
+    all_stats = []
+    active_tasks = set()
+    output_files = []
+    
+    async def play_and_track(game_id: int) -> tuple[int, WorkerStats]:
+        """Play one complete game and return results."""
+        teacher = OpenAIChatModel(
+            model=args.teacher_model,
+            api_key=args.openai_api_key,
+            temperature=args.temperature,
+            max_output_tokens=args.max_tokens,
+        )
+        
+        game_file = output_path.parent / f"{output_path.stem}.game_{game_id}.jsonl"
+        output_files.append(game_file)
+        
+        with game_file.open("w", encoding="utf-8") as handle:
+            examples, stats = await _play_single_game(teacher, handle)
+        
+        logger.info("Game %d complete: %d examples collected", game_id, examples)
+        return examples, stats
+    
+    # Keep spawning games until we reach target
+    while total_examples < target_examples:
+        # Fill up to max_concurrent workers
+        while len(active_tasks) < max_concurrent and total_examples < target_examples:
+            game_counter += 1
+            task = asyncio.create_task(play_and_track(game_counter))
+            active_tasks.add(task)
+            logger.debug("Spawned game task %d | active=%d | total_examples=%d/%d",
+                        game_counter, len(active_tasks), total_examples, target_examples)
+        
+        # Wait for at least one game to complete
+        if active_tasks:
+            done, pending = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+            
+            # Process completed games
+            for task in done:
+                examples, stats = await task
+                total_examples += examples
+                all_stats.append(stats)
+                active_tasks.remove(task)
+                
+                if total_examples % args.log_every == 0 or total_examples >= target_examples:
+                    logger.info("Progress: %d / %d examples collected from %d games",
+                               total_examples, target_examples, len(all_stats))
+    
+    # Wait for any remaining active tasks to complete
+    if active_tasks:
+        logger.info("Waiting for %d remaining game(s) to complete...", len(active_tasks))
+        remaining_results = await asyncio.gather(*active_tasks)
+        for examples, stats in remaining_results:
+            total_examples += examples
+            all_stats.append(stats)
+    
+    # Aggregate statistics
+    total_stats = GenerationStats.from_worker_stats(all_stats)
+    
+    # Merge all game files into final output
+    logger.info("Merging %d game files into %s", len(output_files), output_path.name)
+    with output_path.open("w", encoding="utf-8") as outfile:
+        for game_file in output_files:
+            if game_file.exists():
+                with game_file.open("r", encoding="utf-8") as infile:
+                    for line in infile:
+                        outfile.write(line)
+                # Optionally delete game file after merging
+                if not args.keep_worker_files:
+                    game_file.unlink()
+                    logger.debug("Deleted game file: %s", game_file.name)
+    
+    # Log final statistics
+    logger.info("Target reached: %d / %d examples from %d games",
+                total_stats.total_examples, target_examples, total_stats.total_games)
+    total_stats.log_summary()
 
 
 async def _generate_examples_async(args: argparse.Namespace) -> None:
     """Main async function to generate SFT dataset."""
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        level=logging.DEBUG,
         format="%(asctime)s | %(levelname)s | %(message)s",
+        force=True,
     )
+    
+    # Set all loggers to DEBUG to capture everything
+    logging.getLogger().setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
     
     # Initialize teacher model
     teacher = OpenAIChatModel(
@@ -290,8 +546,9 @@ async def _generate_examples_async(args: argparse.Namespace) -> None:
     
     logger.info("Starting SFT generation: target=%d examples, model=%s",
                 args.examples, args.teacher_model)
+    logger.info("Strategy: Play complete games sequentially until target reached")
     
-    # Generate examples
+    # Generate examples by playing complete games
     with output_path.open("w", encoding="utf-8") as handle:
         while stats.total_examples < args.examples:
             await _play_game_for_sft(
@@ -303,6 +560,8 @@ async def _generate_examples_async(args: argparse.Namespace) -> None:
             )
     
     # Log final statistics
+    logger.info("Target reached: %d / %d examples from %d games",
+                stats.total_examples, args.examples, stats.total_games)
     stats.log_summary()
 
 
@@ -311,7 +570,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Generate SFT data for 2048 using an OpenAI teacher."
     )
     parser.add_argument(
-        "--examples", type=int, default=1000, help="Number of SFT pairs to produce."
+        "--examples", 
+        type=int, 
+        default=1000, 
+        help="Number of SFT examples to generate (spawns complete games until target reached)."
     )
     parser.add_argument(
         "--output",
@@ -351,13 +613,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=50,
         help="Log progress every N examples.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Maximum concurrent games to run in parallel (1 = sequential).",
+    )
+    parser.add_argument(
+        "--keep-worker-files",
+        action="store_true",
+        help="Keep individual game files after merging (useful for debugging).",
+    )
     return parser
 
 
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
-    asyncio.run(_generate_examples_async(args))
+    
+    # Choose parallel or sequential generation based on workers count
+    if args.workers > 1:
+        asyncio.run(_generate_examples_parallel(args))
+    else:
+        asyncio.run(_generate_examples_async(args))
 
 
 if __name__ == "__main__":
