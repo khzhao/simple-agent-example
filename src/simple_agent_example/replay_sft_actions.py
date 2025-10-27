@@ -9,12 +9,8 @@ import re
 from pathlib import Path
 from typing import Iterable
 
-from simple_agent_example.env.game import (
-    Direction,
-    TwentyFortyEightGame,
-    apply_agent_move,
-    render_board,
-)
+from simple_agent_example.env.game import (Direction, TwentyFortyEightGame,
+                                           apply_agent_move, render_board)
 
 BOARD_MARKER = "Current board:\n"
 RETURN_MARKER = "Return your answer"
@@ -52,7 +48,9 @@ def _parse_board(prompt: str) -> list[list[int | None]]:
                 except ValueError as exc:
                     raise ValueError(f"Unable to parse cell value '{cell}'") from exc
         if len(cells) != 4:
-            raise ValueError(f"Expected 4 columns, found {len(cells)} in row '{row_text}'")
+            raise ValueError(
+                f"Expected 4 columns, found {len(cells)} in row '{row_text}'"
+            )
         board.append(cells)
 
     return board
@@ -76,7 +74,9 @@ def _render_cells(cells: list[list[int | None]]) -> str:
     return render_board(game_snapshot)
 
 
-def _load_entries(dataset_path: Path) -> Iterable[tuple[list[list[int | None]], Direction]]:
+def _load_entries(
+    dataset_path: Path,
+) -> Iterable[tuple[list[list[int | None]], Direction]]:
     """Yield (board, move) tuples from the dataset."""
     with dataset_path.open("r", encoding="utf-8") as jsonl_file:
         for line_number, line in enumerate(jsonl_file, start=1):

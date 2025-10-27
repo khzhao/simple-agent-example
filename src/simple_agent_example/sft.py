@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+import tinker
 import torch
 from dotenv import load_dotenv
-
-import tinker
 from tinker import ServiceClient
 from tinker.types import AdamParams
 
@@ -155,8 +154,13 @@ def main() -> None:
     datums = [build_datum(tokenizer, r["prompt"], r["completion"]) for r in records]
     datums = [datum for datum in datums if datum is not None]
     logging.info("Prepared %s datum objects", len(datums))
-    prompt_lengths = [len(tokenizer.encode(r["prompt"], add_special_tokens=False)) for r in records]
-    completion_lengths = [len(tokenizer.encode(r["completion"], add_special_tokens=False)) for r in records]
+    prompt_lengths = [
+        len(tokenizer.encode(r["prompt"], add_special_tokens=False)) for r in records
+    ]
+    completion_lengths = [
+        len(tokenizer.encode(r["completion"], add_special_tokens=False))
+        for r in records
+    ]
     logging.info(
         "Prompt tokens: mean=%.1f max=%d | Completion tokens: mean=%.1f max=%d",
         float(np.mean(prompt_lengths)),
@@ -201,9 +205,7 @@ def main() -> None:
                 if "logprobs" in out
             ]
         )
-        weights = np.concatenate(
-            [d.loss_fn_inputs["weights"].tolist() for d in batch]
-        )
+        weights = np.concatenate([d.loss_fn_inputs["weights"].tolist() for d in batch])
         loss = -np.dot(logprobs, weights) / np.clip(weights.sum(), 1e-6, None)
         losses.append(float(loss))
         logging.debug(
@@ -232,7 +234,9 @@ def main() -> None:
 
     preview_count = min(max(args.preview_samples, 0), len(records))
     if preview_count:
-        logging.info("Generating %d preview completions using latest weights", preview_count)
+        logging.info(
+            "Generating %d preview completions using latest weights", preview_count
+        )
         sampling_client = training_client.save_weights_and_get_sampling_client(
             name=f"{args.save_name}-preview"
         )

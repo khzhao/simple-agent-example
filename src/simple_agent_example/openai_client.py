@@ -9,8 +9,8 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 
 from .tinker_client import ChatMessage
@@ -18,6 +18,7 @@ from .tinker_client import ChatMessage
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
 
 def _ensure_openai_key(api_key: Optional[str]) -> str:
     key = api_key or os.getenv("OPENAI_API_KEY")
@@ -82,23 +83,23 @@ class OpenAIChatModel:
         messages: Sequence[ChatMessage],
     ) -> ChatMessage:
         payload = self._convert_messages(messages)
-        
+
         # Build API parameters - some models don't support temperature/max_completion_tokens
         api_params = {
             "model": self.model,
             "messages": payload,
         }
-        
+
         # Only add temperature if not default (some models like o1 don't support it)
         if self.temperature != 1.0:
             api_params["temperature"] = self.temperature
-        elif self.max_output_tokens:
-            api_params["max_completion_tokens"] = self.max_output_tokens
-        
+
         # Add max_completion_tokens if specified
         if self.max_output_tokens:
-            api_params["max_tokens"] = self.max_output_tokens
-        
+            api_params["max_tokens"] = 10000
+
+        print(api_params)
+
         response = await self._client.chat.completions.create(**api_params)
         choice = response.choices[0]
         content = choice.message.content or ""
@@ -122,14 +123,11 @@ class OpenAIRewardModel:
         self.model = model
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
-        self.system_prompt = (
-            system_prompt
-            or (
-                "You are a strict grader for the 2048 puzzle game. "
-                "Return a JSON object with keys 'score' (float between 0 and 1) "
-                "and 'reasoning' (short string) evaluating how well the student "
-                "response matches the teacher response and follows formatting requirements."
-            )
+        self.system_prompt = system_prompt or (
+            "You are a strict grader for the 2048 puzzle game. "
+            "Return a JSON object with keys 'score' (float between 0 and 1) "
+            "and 'reasoning' (short string) evaluating how well the student "
+            "response matches the teacher response and follows formatting requirements."
         )
 
     def _build_messages(
@@ -150,7 +148,7 @@ class OpenAIRewardModel:
             "Rules:\n"
             "- The student should exactly match the teacher's <move> direction.\n"
             "- Penalize invalid formatting or missing tags.\n"
-            "- Return JSON like {\"score\": 1.0, \"reasoning\": \"...\"}.\n"
+            '- Return JSON like {"score": 1.0, "reasoning": "..."}.\n'
             "- Clamp score to [0, 1]."
         )
         return [
@@ -170,23 +168,21 @@ class OpenAIRewardModel:
             teacher_response=teacher_response,
             student_response=student_response,
         )
-        
+
         # Build API parameters - some models don't support temperature/max_completion_tokens
         api_params = {
             "model": self.model,
             "messages": messages,
         }
-        
+
         # Only add temperature if not default (some models like o1 don't support it)
         if self.temperature != 1.0:
             api_params["temperature"] = self.temperature
-        elif self.max_output_tokens:
-            api_params["max_tokens"] = self.max_output_tokens
-        
+
         # Add max_completion_tokens if specified
         if self.max_output_tokens:
-            api_params["max_tokens"] = self.max_output_tokens
-        
+            api_params["max_completion_tokens"] = self.max_output_tokens
+
         response = await self._client.chat.completions.create(**api_params)
         content = (response.choices[0].message.content or "").strip()
 
