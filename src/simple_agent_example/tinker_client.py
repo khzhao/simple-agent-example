@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Iterable, Literal, Optional
 
+import math
 import numpy as np
 import tinker
 import torch
@@ -37,6 +38,8 @@ class TrajectoryStep:
     done: bool = False
     advantage: float = 0.0
     weight: float = 1.0
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
 
 
 @dataclass
@@ -65,7 +68,10 @@ class TinkerTrainableModel:
         api_key: Optional[str] = None,
         rank: int = 8,
         temperature: float = 0.2,
+        temperature_max: Optional[float] = None,
         top_p: float = 0.95,
+        top_p_min: Optional[float] = None,
+        top_p_max: Optional[float] = None,
         max_tokens: int = 200,
         beta1: float = 0.9,
         beta2: float = 0.95,
@@ -87,7 +93,14 @@ class TinkerTrainableModel:
         self.tokenizer = self.training_client.get_tokenizer()
 
         self.temperature = temperature
+        default_temperature_max = min(1.5, max(temperature, temperature + 0.3))
+        self.temperature_max = (
+            temperature_max if temperature_max is not None else default_temperature_max
+        )
         self.top_p = top_p
+        default_top_p_max = min(0.99, max(top_p, top_p + 0.05))
+        self.top_p_min = top_p_min if top_p_min is not None else top_p
+        self.top_p_max = top_p_max if top_p_max is not None else default_top_p_max
         self.max_tokens = max_tokens
         self.beta1 = beta1
         self.beta2 = beta2
@@ -96,6 +109,7 @@ class TinkerTrainableModel:
         self._sampling_client = None
         self._sampler_counter = 0
         self._last_train_stats: dict[str, float] = {}
+        self._sample_counter = 0
 
     # ------------------------------------------------------------------
     # Sampling utilities
@@ -124,6 +138,22 @@ class TinkerTrainableModel:
         )
         self._sampler_counter += 1
 
+    def _temperature_for_iteration(self, iteration: int) -> float:
+        low = min(self.temperature, self.temperature_max)
+        high = max(self.temperature, self.temperature_max)
+        if math.isclose(low, high, rel_tol=1e-6, abs_tol=1e-9):
+            return high
+        span = high - low
+        return low + span / float(iteration + 1)
+
+    def _top_p_for_iteration(self, iteration: int) -> float:
+        min_top = max(0.0, min(1.0, min(self.top_p_min, self.top_p_max)))
+        max_top = max(0.0, min(1.0, max(self.top_p_min, self.top_p_max)))
+        if math.isclose(min_top, max_top, rel_tol=1e-6, abs_tol=1e-9):
+            return max_top
+        span = max_top - min_top
+        return min_top + span / float(iteration + 1)
+
     def _sample_action_sync(
         self,
         prompt_text: str,
@@ -134,9 +164,13 @@ class TinkerTrainableModel:
         prompt_tokens = self._encode_prompt(prompt_text)
         model_input = t_types.ModelInput.from_ints(prompt_tokens)
 
+        iteration = self._sample_counter
+        temperature_value = self._temperature_for_iteration(iteration)
+        top_p_value = self._top_p_for_iteration(iteration)
+
         sampling_params = t_types.SamplingParams(
-            temperature=self.temperature,
-            top_p=self.top_p,
+            temperature=temperature_value,
+            top_p=top_p_value,
             max_tokens=max_tokens or self.max_tokens,
             logprobs=True,
         )
@@ -161,7 +195,10 @@ class TinkerTrainableModel:
             response_text=response_text,
             response_tokens=response_tokens,
             logprobs=logprobs,
+            temperature=temperature_value,
+            top_p=top_p_value,
         )
+        self._sample_counter += 1
         return message, step
 
     async def sample_action(

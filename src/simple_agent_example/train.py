@@ -37,7 +37,10 @@ async def train(args: argparse.Namespace) -> None:
         api_key=args.api_key,
         rank=args.rank,
         temperature=args.temperature,
+        temperature_max=args.temperature_max,
         top_p=args.top_p,
+        top_p_min=args.top_p_min,
+        top_p_max=args.top_p_max,
         max_tokens=args.max_tokens,
         beta1=args.beta1,
         beta2=args.beta2,
@@ -290,7 +293,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE)
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.5)
+    parser.add_argument(
+        "--temperature-max",
+        type=float,
+        default=None,
+        help="Optional upper bound; early iterations start warm then cool inversely with samples.",
+    )
     parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument(
+        "--top-p-min",
+        type=float,
+        default=None,
+        help="Optional lower bound for top-p annealing.",
+    )
+    parser.add_argument(
+        "--top-p-max",
+        type=float,
+        default=None,
+        help="Optional upper bound for top-p annealing (defaults to base top-p).",
+    )
     parser.add_argument("--max-tokens", type=int, default=200)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
