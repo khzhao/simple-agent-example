@@ -40,6 +40,10 @@ class TrajectoryStep:
     weight: float = 1.0
     temperature: Optional[float] = None
     top_p: Optional[float] = None
+    teacher_response_text: Optional[str] = None
+    reward_reason: Optional[str] = None
+    raw_reward: float = 0.0
+    scaled_reward: float = 0.0
 
 
 @dataclass

@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import difflib
-import math
+import asyncio
+import logging
+import random
 import re
 
 from .env import (WINNING_VALUE, apply_agent_move, check_game_finished,
                   generate_game, max_cell_value, render_board,
                   total_board_value)
+from .openai_client import (OpenAIChatModel, OpenAIRewardModel, RewardResult)
 from .tinker_client import ChatMessage, TinkerTrainableModel, Trajectory
+
+logger = logging.getLogger(__name__)
 
 
 def _format_board(board_view: str) -> str:
@@ -24,156 +28,10 @@ def _format_board(board_view: str) -> str:
 def _format_response(content: str) -> str:
     return "\n".join(f"    {line}" for line in content.splitlines())
 
-VALID_ACTION_BONUS = 0.01
-INVALID_BASE_PENALTY = -5.0
-MINIMUM_MOVES_FOR_REWARD = 3
-SHORT_GAME_BASE_PENALTY = -2.0
-WIN_REWARD = 2.0
-FORMAT_ACCEPT_THRESHOLD = 0.95
-INVALID_PENALTY_SCALE = 3.0
-EXPECTED_FORMAT_CANONICAL = "<think></think><move>direction</move>"
-EXPECTED_TAG_SEQUENCE: tuple[str, ...] = ("<think>", "</think>", "<move>", "</move>")
 RESPONSE_PATTERN = re.compile(
     r"^<think>.*?</think>\s*<move>(up|down|left|right)</move>$",
     re.IGNORECASE | re.DOTALL,
 )
-
-
-def _canonicalize_for_similarity(raw_text: str) -> str:
-    cleaned = raw_text.strip().lower()
-    cleaned = re.sub(r"\s+", "", cleaned)
-    cleaned = re.sub(r"<think>.*?</think>", "<think></think>", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(
-        r"<move>\s*(up|down|left|right)\s*</move>",
-        "<move>direction</move>",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    return cleaned
-
-
-def _extract_think_content(raw_text: str) -> str:
-    match = re.search(r"<think>(.*?)</think>", raw_text, re.IGNORECASE | re.DOTALL)
-    if not match:
-        return ""
-    return match.group(1).strip()
-
-
-def _tag_sequence(raw_text: str) -> list[str]:
-    return re.findall(r"</?think>|</?move>", raw_text, flags=re.IGNORECASE)
-
-
-def _token_bigram_jaccard(raw_text: str, reference: tuple[str, ...]) -> float:
-    tokens = re.findall(r"[a-z]+|</?think>|</?move>", raw_text, flags=re.IGNORECASE)
-    tokens = [token.lower() for token in tokens]
-    if len(tokens) < 2:
-        return 0.0
-    bigrams = {tuple(tokens[i : i + 2]) for i in range(len(tokens) - 1)}
-    ref_bigrams = {tuple(reference[i : i + 2]) for i in range(len(reference) - 1)}
-    union = bigrams | ref_bigrams
-    if not union:
-        return 0.0
-    return len(bigrams & ref_bigrams) / len(union)
-
-
-def _noise_penalty(raw_text: str) -> float:
-    stripped = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.IGNORECASE | re.DOTALL)
-    stripped = re.sub(r"<move>.*?</move>", "", stripped, flags=re.IGNORECASE | re.DOTALL)
-    leftover = stripped.strip()
-    if not leftover:
-        return 0.0
-    return min(0.4, len(leftover) / 200.0)
-
-
-def _format_similarity(raw_text: str) -> float:
-    text = raw_text.strip()
-    if not text:
-        return 0.0
-
-    lowered = text.lower()
-    canonical = _canonicalize_for_similarity(lowered)
-    canonical_ratio = difflib.SequenceMatcher(
-        None, canonical, EXPECTED_FORMAT_CANONICAL
-    ).ratio()
-
-    structure_match = 1.0 if RESPONSE_PATTERN.fullmatch(text) else 0.0
-
-    tag_seq = [token.lower() for token in _tag_sequence(lowered)]
-    tag_alignment = (
-        difflib.SequenceMatcher(None, tag_seq, EXPECTED_TAG_SEQUENCE).ratio()
-        if tag_seq
-        else 0.0
-    )
-    bigram_jaccard = _token_bigram_jaccard(lowered, tuple(token.lower() for token in EXPECTED_TAG_SEQUENCE))
-
-    think_present = 1.0 if re.search(r"<think>.*?</think>", lowered, re.DOTALL) else 0.0
-    move_present = 1.0 if re.search(r"<move>.*?</move>", lowered, re.DOTALL) else 0.0
-
-    think_content = _extract_think_content(lowered)
-    if think_content:
-        tokens = re.findall(r"[a-z]+", think_content)
-        unique_tokens = len(set(tokens))
-        diversity = unique_tokens / len(tokens) if tokens else 0.0
-        length_score = min(1.0, len(think_content) / 40.0)
-    else:
-        tokens = []
-        diversity = 0.0
-        length_score = 0.0
-
-    noise = _noise_penalty(lowered)
-
-    tag_presence = 0.5 * (think_present + move_present)
-    similarity = (
-        0.3 * structure_match
-        + 0.2 * canonical_ratio
-        + 0.15 * tag_alignment
-        + 0.1 * bigram_jaccard
-        + 0.1 * length_score
-        + 0.05 * diversity
-        + 0.1 * tag_presence
-    )
-    similarity = max(0.0, min(1.0, similarity - noise))
-    return similarity
-
-
-def _invalid_reward(valid_actions: int, format_similarity: float) -> float:
-    severity = 1.0 + (1.0 - format_similarity) * INVALID_PENALTY_SCALE
-    return severity * INVALID_BASE_PENALTY + VALID_ACTION_BONUS * valid_actions
-
-
-def _compute_reward(
-    *,
-    invalid_move: bool,
-    move_count: int,
-    valid_actions: int,
-    agent_won: bool,
-    max_value: int,
-    board_value: int,
-    format_similarity: float,
-) -> float:
-    """Score trajectories with format-aware rewards."""
-    negative_reward = _invalid_reward(valid_actions, format_similarity)
-
-    if invalid_move:
-        return negative_reward
-
-    if format_similarity < FORMAT_ACCEPT_THRESHOLD:
-        return negative_reward
-
-    if move_count < MINIMUM_MOVES_FOR_REWARD:
-        return SHORT_GAME_BASE_PENALTY + VALID_ACTION_BONUS * valid_actions
-
-    if agent_won:
-        base_reward = WIN_REWARD
-    else:
-        max_value_reward = (math.log(max_value, 2) - 1) / (math.log(WINNING_VALUE, 2) - 1)
-        board_value_reward = (math.log(board_value, 2) - 1) / (
-            math.log(WINNING_VALUE * 16, 2) - 1
-        )
-        base_reward = max_value_reward + (board_value_reward * 0.2)
-
-    base_reward += VALID_ACTION_BONUS * valid_actions
-    return base_reward * format_similarity
 
 SYSTEM_PROMPT = (
     "You are an excellent 2048 player."
@@ -207,14 +65,85 @@ def extract_move_xml(model_output: str) -> str:
     return f"<move>{direction}</move>"
 
 
+def _teacher_prompt(board_view: str) -> str:
+    return (
+        "Current board:\n"
+        f"{board_view}\n"
+        "Return your answer using exactly:\n"
+        "<think>...</think>\n"
+        "<move>direction</move>"
+    )
+
+
+class TeacherFormatError(RuntimeError):
+    """Raised when the teacher response does not follow the required format."""
+
+
+async def _sample_teacher_with_retry(
+    teacher: OpenAIChatModel,
+    prompt_text: str,
+    *,
+    max_retries: int = 3,
+    backoff_seconds: float = 1.0,
+) -> tuple[ChatMessage, int, int, str]:
+    last_error: Exception | None = None
+    format_failures = 0
+    current_prompt = prompt_text
+    for attempt in range(1, max_retries + 1):
+        messages = [
+            ChatMessage(role="system", content=SYSTEM_PROMPT),
+            ChatMessage(role="user", content=current_prompt),
+        ]
+        try:
+            reply = await teacher.sample_action(messages)
+        except Exception as exc:  # pragma: no cover - network failure path
+            last_error = exc
+            logger.warning(
+                "Teacher sampling failed on attempt %d/%d: %s",
+                attempt,
+                max_retries,
+                exc,
+            )
+            if attempt < max_retries:
+                await asyncio.sleep(backoff_seconds)
+                continue
+            break
+
+        content = reply.content.strip()
+        if not RESPONSE_PATTERN.fullmatch(content):
+            format_failures += 1
+            last_error = TeacherFormatError(
+                "Teacher response missing required <think>/<move> format."
+            )
+            logger.warning(
+                "Teacher produced invalid format on attempt %d/%d",
+                attempt,
+                max_retries,
+            )
+            current_prompt = (
+                f"{current_prompt}\n\nThe previous response was invalid: {content!r}"
+            )
+            if attempt < max_retries:
+                await asyncio.sleep(backoff_seconds)
+                continue
+            break
+
+        return reply, attempt, format_failures, current_prompt
+    if last_error is None:
+        raise RuntimeError("Teacher sampling failed without exception.")
+    raise last_error
+
+
 async def rollout(
     model: TinkerTrainableModel,
+    teacher: OpenAIChatModel,
+    reward_model: OpenAIRewardModel,
     step: int,
     *,
     is_validation: bool = False,
     verbose: bool = False,
 ) -> Trajectory:
-    """Generate a single trajectory by playing a game to completion."""
+    """Generate a single trajectory using an OpenAI teacher for rollouts."""
     game = generate_game()
     move_count = 0
 
@@ -225,46 +154,155 @@ async def rollout(
         metrics={},
     )
 
-    invalid_move = False
+    trajectory.metadata["teacher_responses"] = []
+    raw_reward_values: list[float] = []
+    scaled_reward_values: list[float] = []
 
     while True:
         board_view = render_board(game)
-        trajectory.messages.append(ChatMessage(role="user", content=board_view))
+        user_message = ChatMessage(role="user", content=board_view)
+        trajectory.messages.append(user_message)
         if verbose:
             print(f"\n=== Step {move_count:02d} ===")
             print(_format_board(board_view))
 
         prompt_text = build_prompt(board_view)
-        assistant_message, step_info = await model.sample_action(prompt_text)
-        trajectory.messages.append(assistant_message)
-        trajectory.steps.append(step_info)
+        teacher_prompt = _teacher_prompt(board_view)
+        total_attempts = 0
+        total_format_retries = 0
+        noop_retries = 0
+        invalid_move_retries = 0
+        teacher_reply: ChatMessage | None = None
+        teacher_move_xml: str | None = None
+        teacher_valid = False
 
-        format_similarity = _format_similarity(assistant_message.content)
-        trajectory.metrics["format_similarity_sum"] = (
-            trajectory.metrics.get("format_similarity_sum", 0.0) + format_similarity
-        )
-        trajectory.metrics["format_similarity_count"] = (
-            trajectory.metrics.get("format_similarity_count", 0) + 1
-        )
+        while True:
+            try:
+                (
+                    teacher_reply_candidate,
+                    attempts_used,
+                    format_retries,
+                    teacher_prompt,
+                ) = await _sample_teacher_with_retry(
+                    teacher,
+                    teacher_prompt,
+                )
+            except TeacherFormatError as exc:
+                trajectory.metrics["teacher_invalid_format"] = 1
+                trajectory.metadata["teacher_sampling_error"] = str(exc)
+                if verbose:
+                    print(f"Teacher returned invalid format after retries: {exc}")
+                if trajectory.steps:
+                    trajectory.steps[-1].done = True
+                break
+            except Exception as exc:  # pragma: no cover - network failure path
+                trajectory.metrics["teacher_sampling_failure"] = 1
+                trajectory.metadata["teacher_sampling_error"] = str(exc)
+                if verbose:
+                    print(f"Teacher sampling failed after retries: {exc}")
+                if trajectory.steps:
+                    trajectory.steps[-1].done = True
+                break
 
-        try:
-            move_xml = extract_move_xml(assistant_message.content)
-            apply_agent_move(game, move_xml)
-            move_count += 1
-            trajectory.metrics.setdefault("valid_actions", 0)
-            trajectory.metrics["valid_actions"] += 1
-            if verbose:
-                print("Assistant response:")
-                print(_format_response(assistant_message.content))
-        except ValueError:
-            trajectory.metrics["invalid_move"] = 1
-            invalid_move = True
-            if trajectory.steps:
-                trajectory.steps[-1].done = True
+            total_attempts += attempts_used
+            total_format_retries += format_retries
+
+            content = teacher_reply_candidate.content.strip()
+            try:
+                move_xml = extract_move_xml(content)
+            except ValueError:
+                invalid_move_retries += 1
+                teacher_prompt = (
+                    f"{teacher_prompt}\n\nThe previous response was invalid: {content!r}"
+                )
+                continue
+
+            rng_state = random.getstate()
+            preview_game = {
+                "id": game["id"],
+                "board": [row[:] for row in game["board"]],
+            }
+            try:
+                apply_agent_move(preview_game, move_xml)
+            except ValueError as exc:
+                random.setstate(rng_state)
+                message_lower = str(exc).lower()
+                if "did not change board" in message_lower:
+                    noop_retries += 1
+                    teacher_prompt = (
+                        f"{teacher_prompt}\n\nYour last move '{move_xml}' did not change the board. Try a different direction."
+                    )
+                    continue
+                invalid_move_retries += 1
+                teacher_prompt = (
+                    f"{teacher_prompt}\n\nThe previous move was invalid: {exc}"
+                )
+                continue
+            random.setstate(rng_state)
+
+            teacher_reply = teacher_reply_candidate
+            teacher_move_xml = move_xml
+            teacher_valid = True
             break
 
+        if not teacher_valid or teacher_reply is None or teacher_move_xml is None:
+            break
+
+        if total_attempts > 1:
+            trajectory.metrics["teacher_retry_attempts"] = (
+                trajectory.metrics.get("teacher_retry_attempts", 0.0)
+                + float(total_attempts - 1)
+            )
+        if total_format_retries:
+            trajectory.metrics["teacher_invalid_format_retries"] = (
+                trajectory.metrics.get("teacher_invalid_format_retries", 0.0)
+                + float(total_format_retries)
+            )
+        if noop_retries:
+            trajectory.metrics["teacher_noop_retries"] = (
+                trajectory.metrics.get("teacher_noop_retries", 0.0) + float(noop_retries)
+            )
+        if invalid_move_retries:
+            trajectory.metrics["teacher_invalid_move_retries"] = (
+                trajectory.metrics.get("teacher_invalid_move_retries", 0.0)
+                + float(invalid_move_retries)
+            )
+
+        trajectory.metadata["teacher_responses"].append(teacher_reply.content)
+
+        assistant_message, step_info = await model.sample_action(prompt_text)
+        trajectory.messages.append(assistant_message)
+        step_info.teacher_response_text = teacher_reply.content
+        trajectory.steps.append(step_info)
+
+        reward_result: RewardResult = await reward_model.score(
+            board_view=board_view,
+            teacher_response=teacher_reply.content,
+            student_response=assistant_message.content,
+        )
+        step_info.raw_reward = reward_result.score
+        step_info.reward_reason = reward_result.reasoning
+        scaled_reward = (2.0 * reward_result.score) - 1.0
+        step_info.scaled_reward = scaled_reward
+        raw_reward_values.append(reward_result.score)
+        scaled_reward_values.append(scaled_reward)
+
+        if verbose:
+            print("Teacher response:")
+            print(_format_response(teacher_reply.content))
+            print("Student response:")
+            print(_format_response(assistant_message.content))
+            print(
+                f"Reward raw: {reward_result.score:.3f} | scaled: {scaled_reward:.3f} | {reward_result.reasoning}"
+            )
+
+        apply_agent_move(game, teacher_move_xml)
+        move_count += 1
+        trajectory.metrics.setdefault("teacher_valid_actions", 0)
+        trajectory.metrics["teacher_valid_actions"] += 1
+
         if check_game_finished(game):
-            trajectory.metrics["invalid_move"] = 0
+            trajectory.metrics["teacher_invalid_move"] = 0
             if trajectory.steps:
                 trajectory.steps[-1].done = True
             break
@@ -286,33 +324,36 @@ async def rollout(
         }
     )
 
-    valid_actions = trajectory.metrics.get("valid_actions", 0)
+    if scaled_reward_values:
+        trajectory.reward = float(sum(scaled_reward_values) / len(scaled_reward_values))
+        trajectory.metrics["teacher_reward_mean"] = trajectory.reward
+        trajectory.metrics["teacher_reward_min"] = float(min(scaled_reward_values))
+        trajectory.metrics["teacher_reward_max"] = float(max(scaled_reward_values))
+        trajectory.metrics["teacher_reward_count"] = float(len(scaled_reward_values))
+        trajectory.metrics["teacher_reward_raw_mean"] = float(
+            sum(raw_reward_values) / len(raw_reward_values)
+        )
+        trajectory.metrics["teacher_reward_raw_min"] = float(min(raw_reward_values))
+        trajectory.metrics["teacher_reward_raw_max"] = float(max(raw_reward_values))
+    else:
+        trajectory.reward = 0.0
+        trajectory.metrics["teacher_reward_mean"] = 0.0
+        trajectory.metrics["teacher_reward_min"] = 0.0
+        trajectory.metrics["teacher_reward_max"] = 0.0
+        trajectory.metrics["teacher_reward_count"] = 0.0
+        trajectory.metrics["teacher_reward_raw_mean"] = 0.0
+        trajectory.metrics["teacher_reward_raw_min"] = 0.0
+        trajectory.metrics["teacher_reward_raw_max"] = 0.0
 
-    format_similarity_sum = trajectory.metrics.pop("format_similarity_sum", 0.0)
-    format_similarity_count = trajectory.metrics.pop("format_similarity_count", 0)
-    format_similarity = (
-        float(format_similarity_sum / format_similarity_count)
-        if format_similarity_count
-        else 0.0
-    )
-    trajectory.metrics["format_similarity"] = format_similarity
+    trajectory.metrics["invalid_move"] = trajectory.metrics.get("teacher_invalid_move", 0)
 
-    trajectory.reward = _compute_reward(
-        invalid_move=invalid_move,
-        move_count=move_count,
-        valid_actions=valid_actions,
-        agent_won=agent_won,
-        max_value=max_value,
-        board_value=board_value,
-        format_similarity=format_similarity,
-    )
     if trajectory.steps:
         for step_info in trajectory.steps:
             step_info.reward = trajectory.reward
 
     if verbose:
         print(
-            f"Reward: {trajectory.reward:.3f} | Max tile: {max_value} | Board value: {board_value} | Valid actions: {valid_actions}"
+            f"Reward: {trajectory.reward:.3f} | Max tile: {max_value} | Board value: {board_value} | Moves: {move_count}"
         )
 
     return trajectory
